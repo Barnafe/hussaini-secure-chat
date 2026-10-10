@@ -8,9 +8,11 @@ Encryption happens HERE: text is encrypted with AES-256-GCM before it is handed
 to the network layer, and decrypted only after it arrives. The key comes from the
 user's own passphrase (see shared/keys.py), so the server only ever sees ciphertext.
 """
+import re
 from datetime import datetime, timezone
 
 from client.network import NetworkClient, normalize_address
+from client.prefs import Prefs
 from shared import protocol as P
 from shared.crypto_utils import PBKDF2_ITERATIONS, DecryptionError
 from shared.keys import (Identity, PeerKeyError, generate_passphrase, normalize_passphrase,
@@ -28,19 +30,61 @@ def group_key(group_id):
     return f"group:{int(group_id)}"
 
 
-def local_time(ts: str) -> str:
-    """Server timestamps are UTC 'YYYY-MM-DD HH:MM:SS'; show them in local time."""
+def local_dt(ts: str):
+    """Server timestamps are UTC 'YYYY-MM-DD HH:MM:SS'; return a local datetime (or None)."""
     try:
-        dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-        return dt.astimezone().strftime("%d %b %H:%M")
+        return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).astimezone()
     except (TypeError, ValueError):
-        return str(ts or "")
+        return None
+
+
+def local_time(ts: str) -> str:
+    dt = local_dt(ts)
+    return dt.strftime("%d %b %H:%M") if dt else str(ts or "")
+
+
+def clock(ts: str) -> str:
+    """'3:58 PM' (no leading zero, same on every platform)."""
+    dt = local_dt(ts)
+    return dt.strftime("%I:%M %p").lstrip("0") if dt else ""
+
+
+def day_label(ts: str, today=None) -> str:
+    """'Today, 10 Oct 2026' / 'Yesterday, 9 Oct 2026' / '3 Oct 2026'."""
+    dt = local_dt(ts)
+    if dt is None:
+        return ""
+    today = (today or datetime.now().astimezone()).date()
+    text = f"{dt.day} {dt.strftime('%b %Y')}"
+    days = (today - dt.date()).days
+    return f"Today, {text}" if days == 0 else f"Yesterday, {text}" if days == 1 else text
+
+
+def list_time(ts: str, today=None) -> str:
+    """Time shown in the chat list: the clock today, 'Yesterday', else the short date."""
+    dt = local_dt(ts)
+    if dt is None:
+        return ""
+    today = (today or datetime.now().astimezone()).date()
+    days = (today - dt.date()).days
+    if days == 0:
+        return clock(ts)
+    return "Yesterday" if days == 1 else f"{dt.day} {dt.strftime('%b')}"
+
+
+_URL_RE = re.compile(r"(?:https?://|www\.)[^\s<>\"']+", re.IGNORECASE)
+
+
+def find_links(text: str):
+    """URLs inside a message (trailing punctuation removed)."""
+    return [m.group(0).rstrip(".,;:!?)") for m in _URL_RE.finditer(text or "")]
 
 
 class ChatController:
-    def __init__(self, network_factory=NetworkClient, kdf_iterations=PBKDF2_ITERATIONS):
+    def __init__(self, network_factory=NetworkClient, kdf_iterations=PBKDF2_ITERATIONS, prefs=None):
         self._network_factory = network_factory
         self._kdf_iterations = kdf_iterations
+        self.prefs = prefs if prefs is not None else Prefs()
         self.on_update = lambda topic, payload=None: None
         self.network = None
         self.connected = False
@@ -63,6 +107,9 @@ class ChatController:
         self.user_results = []       # last "find people" answer: [{"username", "fullname", ...}]
         self.user_more = False       # True if there were more matches than were sent
         self.user_query = None
+        self.profiles = {}           # username -> {"fullname", "bio", "avatar_ver"} for everyone we know of
+        self.avatars = {}            # username -> (version, base64 picture) - fetched on demand
+        self._avatar_asked = set()   # (username, version) already requested
         self._pending_auth = None
         self._pending_identity = None    # key pair of the login attempt in flight
         self._pending_register = None    # {"username", "passphrase"} of the registration in flight
@@ -174,6 +221,7 @@ class ChatController:
         if self._pending_identity is not None:
             self.identity = self._pending_identity
         self.me = ev["user"]
+        self._learn_profile(self.me)
         self.network.retry = True
         if self._last_login_msg:
             self._login_msg = self._last_login_msg
@@ -184,13 +232,20 @@ class ChatController:
 
     def _on_state(self, ev):
         self.friends = {f["username"]: {"fullname": f["fullname"], "online": f["online"],
-                                        "public_key": f.get("public_key", "")}
+                                        "public_key": f.get("public_key", ""), "bio": f.get("bio", ""),
+                                        "avatar_ver": f.get("avatar_ver", "")}
                         for f in ev.get("friends", [])}
+        for f in ev.get("friends", []):
+            self._learn_profile(f)
+        for r in ev.get("requests_in", []):
+            self._learn_profile(r)
         self.requests_in = list(ev.get("requests_in", []))
         self.requests_out = set(ev.get("requests_out", []))
         self.groups = {g["group_id"]: g for g in ev.get("groups", [])}
         self._learn_keys()
         self.online_users = {u["username"]: u["fullname"] for u in ev.get("online", [])}
+        for u in ev.get("online", []):
+            self._learn_profile(u)
         if self.current and not self._conversation_exists(self.current):
             self.current = None
         self._notify("state")
@@ -199,6 +254,7 @@ class ChatController:
         u = ev["username"]
         if ev["online"]:
             self.online_users[u] = ev.get("fullname", u)
+            self._learn_profile(ev)
         else:
             self.online_users.pop(u, None)
         if u in self.friends:
@@ -223,7 +279,9 @@ class ChatController:
     def _on_friend_added(self, ev):
         u = ev["user"]
         self.friends[u["username"]] = {"fullname": u["fullname"], "online": u["online"],
-                                       "public_key": u.get("public_key", "")}
+                                       "public_key": u.get("public_key", ""), "bio": u.get("bio", ""),
+                                       "avatar_ver": u.get("avatar_ver", "")}
+        self._learn_profile(u)
         self._learn_keys()
         self.requests_in = [r for r in self.requests_in if r["username"] != u["username"]]
         self.requests_out.discard(u["username"])
@@ -238,6 +296,8 @@ class ChatController:
 
     def _on_group_update(self, ev):
         g = ev["group"]
+        for m in g.get("members", []):
+            self._learn_profile(m)
         is_new = g["group_id"] not in self.groups
         self.groups[g["group_id"]] = g
         self._learn_keys()
@@ -271,6 +331,69 @@ class ChatController:
     def _on_logged_out(self, ev):
         self._teardown()
         self._notify("logged_out")
+
+    # ---- profiles & pictures ------------------------------------------- #
+    def _learn_profile(self, card):
+        """Remember a user's name / status / picture version from any server message."""
+        u = card.get("username")
+        if not u:
+            return
+        p = self.profiles.setdefault(u, {"fullname": u, "bio": "", "avatar_ver": ""})
+        for k in ("fullname", "bio", "avatar_ver"):
+            if k in card and card[k] is not None:
+                p[k] = card[k]
+
+    def _on_profile(self, ev):
+        """Somebody changed their name, status line or picture."""
+        u = ev["username"]
+        self._learn_profile(ev)
+        if u in self.friends:
+            self.friends[u].update(fullname=ev["fullname"], bio=ev.get("bio", ""),
+                                   avatar_ver=ev.get("avatar_ver", ""))
+        if u in self.online_users:
+            self.online_users[u] = ev["fullname"]
+        for g in self.groups.values():
+            for m in g["members"]:
+                if m["username"] == u:
+                    m["fullname"] = ev["fullname"]
+        for r in self.requests_in:
+            if r["username"] == u:
+                r["fullname"] = ev["fullname"]
+        self._notify("profile", u)
+
+    def _on_profile_result(self, ev):
+        if ev.get("ok") and self.me:
+            self.me.update(fullname=ev["fullname"], bio=ev.get("bio", ""), avatar_ver=ev.get("avatar_ver", ""))
+            self._learn_profile(self.me)
+        self._notify("profile_result", ev)
+
+    def _on_password_result(self, ev):
+        self._notify("password_result", ev)
+
+    def _on_avatar(self, ev):
+        u = ev["username"]
+        if ev.get("data"):
+            self.avatars[u] = (ev.get("avatar_ver", ""), ev["data"])
+        else:
+            self.avatars.pop(u, None)
+        self._notify("avatar", u)
+
+    def avatar_b64(self, username):
+        """The user's current picture (base64 JPEG/PNG) or None. Asks the server for it the first time."""
+        ver = self.profiles.get(username, {}).get("avatar_ver", "")
+        if not ver:
+            return None
+        cached = self.avatars.get(username)
+        if cached and cached[0] == ver:
+            return cached[1]
+        if (username, ver) not in self._avatar_asked and self.network is not None and self.connected:
+            self._avatar_asked.add((username, ver))
+            self.network.send({"type": "avatar_get", "username": username}, quiet=True)
+        return cached[1] if cached else None
+
+    def avatar_version(self, username):
+        """Changes whenever the picture changes (use it as a cache key for rendered images)."""
+        return self.profiles.get(username, {}).get("avatar_ver", "")
 
     # ---- messages ------------------------------------------------------ #
     def _learn_keys(self):
@@ -325,6 +448,18 @@ class ChatController:
         self._store(key, ev["id"], ev["from"], text, ok, ev["timestamp"])
         if fresh:
             self._bump_unread(key, ev["from"])
+        self._notify("conversation", key)
+
+    def _on_last_message(self, ev):
+        """The newest message of a conversation, for the chat list (never counts as unread)."""
+        if ev.get("kind") == "group":
+            key = group_key(ev["group_id"])
+            text, ok = self._decrypt_group(ev["from"], ev["group_id"], ev["payload"])
+        else:
+            other = ev["to"] if ev["from"] == self.me["username"] else ev["from"]
+            key = dm_key(other)
+            text, ok = self._decrypt_dm(ev)
+        self._store(key, ev["id"], ev["from"], text, ok, ev["timestamp"])
         self._notify("conversation", key)
 
     def _on_history(self, ev):
@@ -392,29 +527,6 @@ class ChatController:
             return False
         return self.network.send({"type": "send_group", "group_id": gid, "payload": payload})
 
-    def search_users(self, query=""):
-        """Ask the server for people to add. An empty query lists everybody."""
-        self.network.send({"type": "user_search", "query": (query or "").strip()})
-
-    def relationship(self, username):
-        """friend / request_received / request_sent / none - always up to date with live events."""
-        if username in self.friends:
-            return "friend"
-        if any(r["username"] == username for r in self.requests_in):
-            return "request_received"
-        if username in self.requests_out:
-            return "request_sent"
-        return "none"
-
-    def is_online(self, username):
-        return username in self.online_users
-
-    def _on_user_list(self, ev):
-        self.user_results = list(ev.get("users", []))
-        self.user_more = bool(ev.get("more"))
-        self.user_query = ev.get("query", "")
-        self._notify("user_list")
-
     def send_friend_request(self, username):
         self.network.send({"type": "friend_request", "to": username})
 
@@ -436,6 +548,70 @@ class ChatController:
     def group_leave(self, gid):
         self.network.send({"type": "group_leave", "group_id": gid})
 
+    def search_users(self, query=""):
+        """Ask the server for people to add. An empty query lists everybody."""
+        self.network.send({"type": "user_search", "query": (query or "").strip()})
+
+    def relationship(self, username):
+        """friend / request_received / request_sent / none - always up to date with live events."""
+        if username in self.friends:
+            return "friend"
+        if any(r["username"] == username for r in self.requests_in):
+            return "request_received"
+        if username in self.requests_out:
+            return "request_sent"
+        return "none"
+
+    def is_online(self, username):
+        return username in self.online_users
+
+    def _on_user_list(self, ev):
+        self.user_results = list(ev.get("users", []))
+        self.user_more = bool(ev.get("more"))
+        self.user_query = ev.get("query", "")
+        for u in self.user_results:
+            self._learn_profile(u)
+        self._notify("user_list")
+
+    def update_profile(self, fullname, bio):
+        error = P.validate_profile(fullname, bio)
+        if error:
+            self._notify("profile_result", {"ok": False, "message": error})
+            return False
+        return self.network.send({"type": "profile_update", "fullname": fullname.strip(), "bio": bio.strip()})
+
+    def set_avatar(self, b64):
+        """b64 = a prepared picture (see client/images.prepare_avatar), or '' to remove it."""
+        error = P.validate_avatar(b64)
+        if error:
+            self._notify("profile_result", {"ok": False, "message": error})
+            return False
+        return self.network.send({"type": "avatar_set", "data": b64})
+
+    def change_password(self, old, new, confirm):
+        if not old:
+            self._notify("password_result", {"ok": False, "message": "Enter your current password."})
+            return False
+        error = P.validate_new_password(new, confirm)
+        if error:
+            self._notify("password_result", {"ok": False, "message": error})
+            return False
+        return self.network.send({"type": "password_change", "old": old, "new": new, "confirm": confirm})
+
+    def set_muted(self, key, muted):
+        self.prefs.set_muted(self.me["username"], key, muted)
+        self._notify("unread", key)
+
+    def is_muted(self, key):
+        return bool(self.me and self.prefs.is_muted(self.me["username"], key))
+
+    def clear_chat(self, key):
+        """Hide this conversation's messages on THIS computer (the server's copy is untouched)."""
+        ids = list(self.messages.get(key, {}))
+        if ids:
+            self.prefs.set_cleared(self.me["username"], key, max(ids))
+        self._notify("conversation", key)
+
     def logout(self):
         if self.network is not None and self.connected:
             self.network.send({"type": "logout"})
@@ -456,7 +632,52 @@ class ChatController:
     # read-only helpers for the GUI
     # ------------------------------------------------------------------ #
     def conversation(self, key):
-        return sorted(self.messages.get(key, {}).values(), key=lambda m: m["id"])
+        floor = self.prefs.cleared_upto(self.me["username"], key) if self.me else 0
+        return sorted((m for m in self.messages.get(key, {}).values() if m["id"] > floor),
+                      key=lambda m: m["id"])
+
+    def last_message(self, key):
+        msgs = self.conversation(key)
+        return msgs[-1] if msgs else None
+
+    def conversation_rows(self):
+        """Everything for the chat list, newest conversation first.
+
+        Each row: key, kind ('dm'/'group'), username/group_id, name, online, last (message or None),
+        unread (count), muted.
+        """
+        rows = []
+        for u, f in self.friends.items():
+            key = dm_key(u)
+            rows.append({"key": key, "kind": "dm", "username": u, "name": f["fullname"],
+                         "online": f["online"], "last": self.last_message(key),
+                         "unread": self.unread.get(key, 0), "muted": self.is_muted(key)})
+        for g in self.groups.values():
+            key = group_key(g["group_id"])
+            rows.append({"key": key, "kind": "group", "group_id": g["group_id"], "name": g["name"],
+                         "members": len(g["members"]), "online": False, "last": self.last_message(key),
+                         "unread": self.unread.get(key, 0), "muted": self.is_muted(key)})
+        rows.sort(key=lambda r: r["name"].lower())
+        rows.sort(key=lambda r: (r["last"]["timestamp"], r["last"]["id"]) if r["last"] else ("", 0), reverse=True)
+        return rows
+
+    def shared_links(self, key, limit=5):
+        """Links people posted in this conversation, newest first: [(url, host)]."""
+        seen, out = set(), []
+        for m in reversed(self.conversation(key)):
+            for url in reversed(find_links(m["text"])):
+                if url not in seen:
+                    seen.add(url)
+                    host = re.sub(r"^https?://", "", url, flags=re.IGNORECASE).split("/")[0]
+                    out.append((url, host.removeprefix("www.")))
+                    if len(out) >= limit:
+                        return out
+        return out
+
+    def bio_of(self, username):
+        if self.me and username == self.me["username"]:
+            return self.me.get("bio", "")
+        return self.profiles.get(username, {}).get("bio", "")
 
     def title_for(self, key):
         if key is None:

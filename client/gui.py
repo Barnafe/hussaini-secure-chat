@@ -1,42 +1,55 @@
-"""Tkinter desktop client for Hussaini Secure Chat.
+"""Tkinter desktop client for Hussaini Secure Chat - ChatSphere look.
 
-The GUI is deliberately thin: all logic lives in ``ChatController``.
+The GUI is deliberately thin: all logic lives in ``ChatController``. The look (rounded
+shapes, gradients, avatars) comes from client/theme.py, images.py, widgets.py and panels.py.
 """
+import hashlib
+import base64
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-from client.controller import ChatController, dm_key, group_key, local_time
+from client import images
+from client import theme as T
+from client.controller import ChatController, dm_key, group_key
+from client.panels import INFO_W, SIDEBAR_W, ChatPane, InfoPane, Sidebar, group_photo, user_avatar
+from client.widgets import PillButton, PillEntry, ScrollFrame, Toast
+from shared import protocol as P
 from shared import settings as app_settings
 
 APP_TITLE = "Hussaini Secure Chat"
 MONO = ("Consolas", 17, "bold")
+IMAGE_TYPES = [("Pictures", "*.png *.jpg *.jpeg *.bmp *.gif *.webp"), ("All files", "*.*")]
+EMOJIS = ("\U0001F600 \U0001F604 \U0001F60A \U0001F609 \U0001F60D \U0001F618 \U0001F60E \U0001F914 \U0001F62E \U0001F622 "
+          "\U0001F62D \U0001F621 \U0001F44D \U0001F44E \U0001F44F \U0001F64F \U0001F4AA \U0001F44B \U0001F64C \U0001F91D "
+          "\u2764\ufe0f \U0001F525 \u2728 \U0001F389 \U0001F4AF \u2705 \u274C \u2B50 \U0001F680 \U0001F4A1 "
+          "\U0001F3B5 \U0001F355 \u2615 \U0001F31F \U0001F308 \U0001F3E0 \U0001F4DA \U0001F4BB \U0001F4F1 \U0001F4F7").split()
 
 
 def default_server():
     """Server address shown in the login window (settings.txt: server_address)."""
     return app_settings.load()["server_address"]
 
-# Professional midnight-blue theme with cyan accents.
-BG = "#0b1220"
-PANEL = "#111c2e"
-PANEL_ALT = "#17253a"
-FIELD = "#0d1728"
-ACCENT = "#38bdf8"
-ACCENT_DARK = "#087eae"
-TEXT = "#e7eef8"
-MUTED = "#9aabc2"
-OK_COLOR = "#34d399"
-BAD_COLOR = "#fb7185"
-ME_BG = "#123c56"
-OTHER_BG = "#1d2b40"
+
+def fingerprint(public_key_b64):
+    """Short, comparable fingerprint of a public key: 'A1B2 C3D4 ...' (SHA-256, first 16 bytes)."""
+    try:
+        digest = hashlib.sha256(base64.b64decode(public_key_b64)).hexdigest().upper()
+    except Exception:
+        return ""
+    return " ".join(digest[i:i + 4] for i in range(0, 32, 4))
+
+
+def label(parent, text="", size=14, weight="normal", fg=T.TEXT, bg=T.CARD, **kw):
+    return tk.Label(parent, text=text, font=T.font(size, weight), fg=fg, bg=bg, **kw)
 
 
 # --------------------------------------------------------------------------- #
 # Login / register screen
 # --------------------------------------------------------------------------- #
-class LoginFrame(ttk.Frame):
+class LoginFrame(tk.Canvas):
     def __init__(self, app):
-        super().__init__(app, padding=24)
+        super().__init__(app, bg=T.BG, highlightthickness=0, bd=0)
         self.app = app
         self.server = tk.StringVar(value=default_server())
         self.l_user, self.l_pass, self.l_phrase = tk.StringVar(), tk.StringVar(), tk.StringVar()
@@ -45,63 +58,91 @@ class LoginFrame(ttk.Frame):
         self.status = tk.StringVar()
         self.passphrase_dialog = None        # the "your new passphrase" window, while it is open
         self.new_passphrase = None           # the passphrase created by the last registration
+        self._bg_size = None
+        self.bind("<Configure>", self._paint_bg)
 
-        wrap = ttk.Frame(self, style="Card.TFrame", padding=(30, 26))
-        wrap.place(relx=0.5, rely=0.5, anchor="center")
-        ttk.Label(wrap, text="H", style="BrandMark.TLabel").grid(row=0, column=0, columnspan=2, pady=(0, 5))
-        ttk.Label(wrap, text=APP_TITLE, style="Brand.TLabel").grid(row=1, column=0, columnspan=2, pady=(0, 3))
-        ttk.Label(wrap, text="PRIVATE MESSAGING  \u2022  AES-256-GCM ENCRYPTION",
-                  style="Muted.TLabel").grid(row=2, column=0, columnspan=2, pady=(0, 20))
+        card = tk.Frame(self, bg=T.CARD, highlightthickness=1, highlightbackground=T.LINE)
+        self.card = card
+        self.create_window(0, 0, window=card, tags="card")
+        inner = tk.Frame(card, bg=T.CARD)
+        inner.pack(padx=40, pady=30)
+        head = tk.Frame(inner, bg=T.CARD)
+        head.pack(pady=(0, 4))
+        tk.Label(head, image=T.icon("logo", 54, T.BLUE_HI, 1.9), bg=T.CARD).pack(side="left", padx=(0, 12))
+        tk.Label(head, text=T.BRAND[0], font=T.font(30, "bold"), fg=T.TEXT, bg=T.CARD).pack(side="left")
+        tk.Label(head, text=T.BRAND[1], font=T.font(30, "bold"), fg=T.BLUE_HI, bg=T.CARD).pack(side="left")
+        label(inner, "Private messaging  \u2022  AES-256-GCM encryption", 12, fg=T.MUTED).pack(pady=(0, 16))
 
-        ttk.Label(wrap, text="Server (host:port)", style="FieldLabel.TLabel").grid(
-            row=3, column=0, sticky="w", pady=(5, 14), padx=(0, 10))
-        ttk.Entry(wrap, textvariable=self.server, width=34).grid(row=3, column=1, pady=(5, 14), ipady=4)
+        label(inner, "Server (host:port)", 13, "semibold", T.MUTED).pack(anchor="w")
+        PillEntry(inner, textvariable=self.server, width=380, height=44, radius=14).pack(pady=(4, 14))
 
-        nb = ttk.Notebook(wrap)
-        nb.grid(row=4, column=0, columnspan=2, sticky="ew")
-        self.notebook = nb
-        login_tab, reg_tab = (ttk.Frame(nb, padding=12, style="Panel.TFrame") for _ in range(2))
-        nb.add(login_tab, text="  Login  ")
-        nb.add(reg_tab, text="  Register  ")
+        tabs = tk.Frame(inner, bg=T.CARD)
+        tabs.pack(fill="x")
+        self.tab_labels = []
+        for i, text in enumerate(("Login", "Register")):
+            lb = tk.Label(tabs, text=text, font=T.font(16, "semibold"), bg=T.CARD, cursor="hand2", pady=6)
+            lb.pack(side="left", expand=True, fill="x")
+            lb.bind("<Button-1>", lambda _e, i=i: self.show_tab(i))
+            self.tab_labels.append(lb)
+        tk.Frame(inner, bg=T.LINE, height=1).pack(fill="x", pady=(0, 14))
 
-        self._row(login_tab, 0, "Username", self.l_user)
-        self._row(login_tab, 1, "Password", self.l_pass, show="*")
-        self._row(login_tab, 2, "Passphrase", self.l_phrase, show="*")
-        ttk.Label(login_tab, text="The passphrase you were given when you registered.",
-                  style="Hint.TLabel").grid(row=3, column=0, columnspan=2, sticky="w")
-        self.login_btn = ttk.Button(login_tab, text="Sign in securely", command=self.do_login, style="Accent.TButton")
-        self.login_btn.grid(row=4, column=0, columnspan=2, pady=(10, 0), sticky="ew")
+        self.login_tab, self.reg_tab = tk.Frame(inner, bg=T.CARD), tk.Frame(inner, bg=T.CARD)
+        self._field(self.login_tab, "Username", self.l_user)
+        self._field(self.login_tab, "Password", self.l_pass, show="\u2022")
+        self._field(self.login_tab, "Passphrase", self.l_phrase, show="\u2022")
+        label(self.login_tab, "The passphrase you were given when you registered.", 11, fg=T.MUTED).pack(anchor="w")
+        self.login_btn = PillButton(self.login_tab, "Sign in securely", self.do_login, width=380, height=48)
+        self.login_btn.pack(pady=(14, 0))
 
-        self._row(reg_tab, 0, "Full name", self.r_name)
-        self._row(reg_tab, 1, "Username", self.r_user)
-        self._row(reg_tab, 2, "Password", self.r_pass, show="*")
-        self._row(reg_tab, 3, "Confirm password", self.r_conf, show="*")
-        ttk.Label(reg_tab, text="Your personal passphrase is created for you automatically\n"
-                                "and shown once the account is created.",
-                  style="Hint.TLabel").grid(row=4, column=0, columnspan=2, sticky="w")
-        self.reg_btn = ttk.Button(reg_tab, text="Create account", command=self.do_register, style="Accent.TButton")
-        self.reg_btn.grid(row=5, column=0, columnspan=2, pady=(10, 0), sticky="ew")
+        self._field(self.reg_tab, "Full name", self.r_name)
+        self._field(self.reg_tab, "Username", self.r_user)
+        self._field(self.reg_tab, "Password", self.r_pass, show="\u2022")
+        self._field(self.reg_tab, "Confirm password", self.r_conf, show="\u2022")
+        label(self.reg_tab, "Your personal passphrase is created for you automatically\n"
+                            "and shown once the account is created.", 11, fg=T.MUTED, justify="left").pack(anchor="w")
+        self.reg_btn = PillButton(self.reg_tab, "Create account", self.do_register, width=380, height=48)
+        self.reg_btn.pack(pady=(14, 0))
 
-        self.status_label = ttk.Label(wrap, textvariable=self.status, style="Status.TLabel",
-                                      wraplength=420, justify="center")
-        self.status_label.grid(row=5, column=0, columnspan=2, pady=(12, 0))
+        self.status_label = tk.Label(inner, textvariable=self.status, font=T.font(13), bg=T.CARD, fg=T.RED,
+                                     wraplength=380, justify="center")
+        self.status_label.pack(pady=(12, 0))
+        self.tab = 0
+        self.show_tab(0)
         self.bind_all("<Return>", self._enter)
 
     @staticmethod
-    def _row(parent, row, label, var, show=None):
-        ttk.Label(parent, text=label, style="FieldLabel.TLabel").grid(row=row, column=0, sticky="w", pady=5, padx=(0, 10))
-        ttk.Entry(parent, textvariable=var, show=show, width=30).grid(row=row, column=1, pady=5, ipady=4)
+    def _field(parent, text, var, show=None):
+        label(parent, text, 13, "semibold", T.MUTED).pack(anchor="w", pady=(0, 3))
+        PillEntry(parent, textvariable=var, show=show, width=380, height=44, radius=14).pack(pady=(0, 10))
+
+    def _paint_bg(self, event):
+        w, h = event.width, event.height
+        if w < 20:
+            return
+        self.coords("card", w // 2, h // 2)
+        bw, bh = -(-w // 300) * 300, -(-h // 300) * 300
+        if self._bg_size != (bw, bh):
+            self._bg_size = (bw, bh)
+            self.delete("bg")
+            img = T.photo(("wall", "doodle", bw, bh), lambda: images.wallpaper("doodle", bw, bh))
+            self.create_image(0, 0, image=img, anchor="nw", tags="bg")
+            self.tag_lower("bg")
+
+    def show_tab(self, i):
+        self.tab = i
+        for j, lb in enumerate(self.tab_labels):
+            lb.configure(fg=T.BLUE_HI if j == i else T.MUTED)
+        self.login_tab.pack_forget()
+        self.reg_tab.pack_forget()
+        (self.login_tab, self.reg_tab)[i].pack(fill="x", before=self.status_label)
 
     def _enter(self, _event=None):
         if self.winfo_ismapped():
-            if self.notebook.index(self.notebook.select()) == 0:
-                self.do_login()
-            else:
-                self.do_register()
+            self.do_login() if self.tab == 0 else self.do_register()
 
     def set_status(self, text, ok=False):
         self.status.set(text)
-        self.status_label.configure(foreground=OK_COLOR if ok else BAD_COLOR)
+        self.status_label.configure(fg=T.GREEN if ok else T.RED)
 
     def set_busy(self, busy):
         state = "disabled" if busy else "normal"
@@ -130,7 +171,7 @@ class LoginFrame(ttk.Frame):
         self.new_passphrase = passphrase
         for v in (self.r_name, self.r_user, self.r_pass, self.r_conf):
             v.set("")
-        self.notebook.select(0)
+        self.show_tab(0)
         self.set_status(message + " Keep your passphrase safe, then sign in.", ok=True)
         if passphrase:
             self.passphrase_dialog = PassphraseDialog(self.winfo_toplevel(), username, passphrase)
@@ -145,7 +186,7 @@ class _Dialog(tk.Toplevel):
         self.title(title)
         self._place(parent, width, height)
         self.transient(parent)
-        self.configure(bg=BG)
+        self.configure(bg=T.CARD)
         self.resizable(False, False)
         self.after(50, self._grab)
 
@@ -167,38 +208,44 @@ class _Dialog(tk.Toplevel):
             pass
 
 
+def _listbox(parent, **kw):
+    return tk.Listbox(parent, exportselection=False, bg=T.FIELD, fg=T.TEXT, selectbackground=T.BLUE,
+                      selectforeground="#ffffff", relief="flat", highlightthickness=1,
+                      highlightbackground=T.FIELD_LINE, highlightcolor=T.BLUE, font=T.font(14),
+                      activestyle="none", **kw)
+
+
 class PassphraseDialog(_Dialog):
     """Shows a newly created passphrase. It is displayed only here, so ask the user to save it."""
 
     def __init__(self, parent, username, passphrase):
-        super().__init__(parent, "Your chat passphrase", 500, 392)
+        super().__init__(parent, "Your chat passphrase", 520, 440)
         self.username, self.passphrase = username, passphrase
         self.saved = tk.BooleanVar(value=False)
-        ttk.Label(self, text="Account created \u2714", foreground=OK_COLOR,
-                  font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=20, pady=(18, 2))
-        ttk.Label(self, text=f"This is the personal passphrase for @{username}. You need it every time you "
-                             "sign in, and it unlocks your messages.", wraplength=455,
-                  justify="left").pack(anchor="w", padx=20)
-        box = tk.Entry(self, font=MONO, justify="center", relief="flat", bg=FIELD, fg=ACCENT,
-                       readonlybackground=FIELD, insertbackground=ACCENT, highlightthickness=1,
-                       highlightbackground=ACCENT_DARK, highlightcolor=ACCENT)
+        label(self, "Account created \u2714", 18, "bold", T.GREEN).pack(anchor="w", padx=24, pady=(22, 4))
+        label(self, f"This is the personal passphrase for @{username}. You need it every time you "
+                    "sign in, and it unlocks your messages.", 13, fg=T.TEXT2, wraplength=470,
+              justify="left").pack(anchor="w", padx=24)
+        box = tk.Entry(self, font=MONO, justify="center", relief="flat", bg=T.FIELD, fg=T.BLUE_HI,
+                       readonlybackground=T.FIELD, insertbackground=T.BLUE_HI, highlightthickness=1,
+                       highlightbackground=T.FIELD_LINE, highlightcolor=T.BLUE)
         box.insert(0, passphrase)
         box.configure(state="readonly")
-        box.pack(fill="x", padx=20, pady=(16, 8), ipady=10)
-        row = ttk.Frame(self)
-        row.pack(fill="x", padx=20)
-        self.copy_btn = ttk.Button(row, text="Copy", command=self.copy)
-        self.copy_btn.pack(side="left", expand=True, fill="x", padx=(0, 4))
-        ttk.Button(row, text="Save to a file...", command=self.save_file).pack(
-            side="left", expand=True, fill="x", padx=(4, 0))
-        ttk.Label(self, text="Write it down or save it now. It is shown only once, and nobody (not even the "
-                             "server) can recover it for you.", wraplength=455, justify="left",
-                  foreground=BAD_COLOR).pack(anchor="w", padx=20, pady=(14, 6))
+        box.pack(fill="x", padx=24, pady=(18, 10), ipady=12)
+        row = tk.Frame(self, bg=T.CARD)
+        row.pack(fill="x", padx=24)
+        self.copy_btn = PillButton(row, "Copy", self.copy, style="secondary", width=220, height=42, font_px=14)
+        self.copy_btn.pack(side="left", expand=True, fill="x", padx=(0, 5))
+        PillButton(row, "Save to a file...", self.save_file, style="secondary", width=220, height=42,
+                   font_px=14).pack(side="left", expand=True, fill="x", padx=(5, 0))
+        label(self, "Write it down or save it now. It is shown only once, and nobody (not even the "
+                    "server) can recover it for you.", 12, fg=T.RED, wraplength=470, justify="left"
+              ).pack(anchor="w", padx=24, pady=(16, 8))
         ttk.Checkbutton(self, text="I have saved my passphrase", variable=self.saved, style="Dlg.TCheckbutton",
-                        command=self._toggle).pack(anchor="w", padx=20)
-        self.go_btn = ttk.Button(self, text="Continue to sign in", command=self.destroy,
-                                 style="Accent.TButton", state="disabled")
-        self.go_btn.pack(fill="x", padx=20, pady=16)
+                        command=self._toggle).pack(anchor="w", padx=24)
+        self.go_btn = PillButton(self, "Continue to sign in", self.destroy, width=470, height=46)
+        self.go_btn.configure(state="disabled")
+        self.go_btn.pack(fill="x", padx=24, pady=18)
         self.protocol("WM_DELETE_WINDOW", self._try_close)
 
     def _toggle(self):
@@ -208,8 +255,7 @@ class PassphraseDialog(_Dialog):
         if self.saved.get():
             self.destroy()
         else:
-            messagebox.showinfo("Save your passphrase",
-                                "Please copy or save your passphrase first, then tick "
+            messagebox.showinfo("Save your passphrase", "Please copy or save your passphrase first, then tick "
                                 "'I have saved my passphrase'.", parent=self)
 
     def copy(self):
@@ -237,43 +283,44 @@ class AddFriendDialog(_Dialog):
     """"Find people": everybody on the server is listed straight away, with a search bar to narrow it down."""
 
     STATUS_TEXT = {"friend": "Friends", "request_sent": "Request sent",
-                   "request_received": "Wants to add you - accept in the Friends tab", "none": ""}
+                   "request_received": "Wants to add you - accept in your requests", "none": ""}
 
     def __init__(self, parent, ctrl):
         super().__init__(parent, "Add friend", 460, 580)
         self.ctrl = ctrl
         self.rows = []                       # usernames, in the order shown
         self._timer = None
-        ttk.Label(self, text="Find people", font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=14, pady=(14, 0))
-        ttk.Label(self, text="Everyone who has an account is listed (\u25cf online, \u25cb offline). Type to search by name or username.",
-                  foreground=MUTED, wraplength=430, justify="left").pack(anchor="w", padx=14, pady=(2, 8))
+        label(self, "Find people", 18, "bold").pack(anchor="w", padx=24, pady=(20, 2))
+        label(self, "Everyone who has an account is listed (\u25cf online, \u25cb offline). "
+                    "Type to search by name or username.", 12, fg=T.MUTED, wraplength=410, justify="left"
+              ).pack(anchor="w", padx=24)
         self.query = tk.StringVar()
-        self.entry = ttk.Entry(self, textvariable=self.query)
-        self.entry.pack(fill="x", padx=14)
-        self.entry.bind("<KeyRelease>", self._typed)
-        self.entry.bind("<Return>", lambda e: self.send())
-        self.count = ttk.Label(self, text="Loading...", foreground=MUTED)
-        self.count.pack(anchor="w", padx=14, pady=(6, 2))
-        box = ttk.Frame(self)
-        box.pack(fill="both", expand=True, padx=14)
-        self.lb = tk.Listbox(box, exportselection=False, bg=FIELD, fg=TEXT, selectbackground=ACCENT_DARK,
-                             selectforeground="white", relief="flat", highlightthickness=1,
-                             highlightbackground=PANEL_ALT, font=("Segoe UI", 10), activestyle="none")
+        self.field = PillEntry(self, textvariable=self.query, placeholder="Search people", icon="search",
+                               width=410, height=44)
+        self.field.pack(padx=24, pady=(10, 4))
+        self.query.trace_add("write", lambda *_: self._typed())
+        self.field.entry.bind("<Return>", lambda _e: self.send())
+        self.count = label(self, "Loading...", 12, fg=T.MUTED)
+        self.count.pack(anchor="w", padx=24, pady=(2, 2))
+        box = tk.Frame(self, bg=T.CARD)
+        box.pack(fill="both", expand=True, padx=24)
+        self.lb = _listbox(box, height=10)
         sb = ttk.Scrollbar(box, command=self.lb.yview)
         self.lb.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
         self.lb.pack(side="left", fill="both", expand=True)
-        self.lb.bind("<<ListboxSelect>>", lambda e: self._update_button())
-        self.lb.bind("<Double-Button-1>", lambda e: self.send())
-        self.msg = ttk.Label(self, text="", foreground=MUTED)
-        self.msg.pack(anchor="w", padx=14, pady=(4, 0))
-        self.btn = ttk.Button(self, text="Send friend request", command=self.send, state="disabled")
-        self.btn.pack(fill="x", padx=14, pady=12)
-        self.entry.focus_set()
+        self.lb.bind("<<ListboxSelect>>", lambda _e: self._update_button())
+        self.lb.bind("<Double-Button-1>", lambda _e: self.send())
+        self.msg = label(self, "", 12, fg=T.MUTED)
+        self.msg.pack(anchor="w", padx=24, pady=(4, 0))
+        self.btn = PillButton(self, "Send friend request", self.send, width=410, height=46)
+        self.btn.configure(state="disabled")
+        self.btn.pack(padx=24, pady=(4, 18))
+        self.field.focus_set()
         self.ctrl.search_users("")
 
     # ---- searching ---------------------------------------------------- #
-    def _typed(self, _event=None):
+    def _typed(self):
         if self._timer is not None:
             self.after_cancel(self._timer)
         self._timer = self.after(300, self._search)          # wait until the typing pauses
@@ -281,6 +328,15 @@ class AddFriendDialog(_Dialog):
     def _search(self):
         self._timer = None
         self.ctrl.search_users(self.query.get())
+
+    def destroy(self):
+        if self._timer is not None:
+            try:
+                self.after_cancel(self._timer)
+            except tk.TclError:
+                pass
+            self._timer = None
+        super().destroy()
 
     # ---- showing results ---------------------------------------------- #
     def refresh(self):
@@ -313,34 +369,32 @@ class AddFriendDialog(_Dialog):
         user = self._selected()
         rel = self.ctrl.relationship(user) if user else None
         self.btn.configure(state="normal" if rel == "none" else "disabled")
-        self.msg.configure(text="" if rel in (None, "none") else self.STATUS_TEXT[rel], foreground=MUTED)
+        self.msg.configure(text="" if rel in (None, "none") else self.STATUS_TEXT[rel], fg=T.MUTED)
 
     def send(self):
         user = self._selected()
         if user and self.ctrl.relationship(user) == "none":
             self.ctrl.send_friend_request(user)
-            self.msg.configure(text=f"Sending a request to @{user}...", foreground=OK_COLOR)
+            self.msg.configure(text=f"Sending a request to @{user}...", fg=T.GREEN)
 
 
 class CreateGroupDialog(_Dialog):
     def __init__(self, parent, ctrl):
-        super().__init__(parent, "New group", 360, 440)
+        super().__init__(parent, "New group", 380, 500)
         self.ctrl = ctrl
         self.keys = [u for u, _n, _o in ctrl.friend_list()]
-        ttk.Label(self, text="Group name").pack(anchor="w", padx=14, pady=(14, 2))
+        label(self, "New group", 18, "bold").pack(anchor="w", padx=24, pady=(20, 8))
         self.name = tk.StringVar()
-        ttk.Entry(self, textvariable=self.name).pack(fill="x", padx=14)
-        ttk.Label(self, text="Add friends (click to select several)").pack(anchor="w", padx=14, pady=(12, 2))
-        self.lb = tk.Listbox(self, selectmode=tk.MULTIPLE, exportselection=False, height=12,
-                             bg=FIELD, fg=TEXT, selectbackground=ACCENT_DARK,
-                             selectforeground="white", relief="flat", highlightthickness=1,
-                             highlightbackground=PANEL_ALT, font=("Segoe UI", 10))
+        PillEntry(self, textvariable=self.name, placeholder="Group name", icon="users", width=330, height=44
+                  ).pack(padx=24)
+        label(self, "Add friends (click to select several)", 13, fg=T.MUTED).pack(anchor="w", padx=24, pady=(14, 4))
+        self.lb = _listbox(self, selectmode=tk.MULTIPLE, height=10)
         for u, n, _o in ctrl.friend_list():
-            self.lb.insert(tk.END, f"{n} (@{u})")
-        self.lb.pack(fill="both", expand=True, padx=14)
-        self.msg = ttk.Label(self, text="", foreground=BAD_COLOR)
-        self.msg.pack(anchor="w", padx=14)
-        ttk.Button(self, text="Create group", command=self.create).pack(fill="x", padx=14, pady=12)
+            self.lb.insert(tk.END, f"  {n}  (@{u})")
+        self.lb.pack(fill="both", expand=True, padx=24)
+        self.msg = label(self, "", 12, fg=T.RED)
+        self.msg.pack(anchor="w", padx=24, pady=(4, 0))
+        PillButton(self, "Create group", self.create, width=330, height=46).pack(padx=24, pady=(4, 18))
 
     def create(self):
         name = self.name.get().strip()
@@ -357,28 +411,27 @@ class CreateGroupDialog(_Dialog):
 
 class ManageGroupDialog(_Dialog):
     def __init__(self, parent, ctrl, gid):
-        super().__init__(parent, "Manage group", 380, 480)
+        super().__init__(parent, "Manage group", 400, 560)
         self.ctrl, self.gid = ctrl, gid
         self.title_var = tk.StringVar()
-        ttk.Label(self, textvariable=self.title_var, font=("Segoe UI", 12, "bold")).pack(
-            anchor="w", padx=14, pady=(14, 6))
-        ttk.Label(self, text="Members").pack(anchor="w", padx=14)
-        self.lb = tk.Listbox(self, exportselection=False, height=10, bg=FIELD, fg=TEXT,
-                             selectbackground=ACCENT_DARK, selectforeground="white", relief="flat",
-                             highlightthickness=1, highlightbackground=PANEL_ALT, font=("Segoe UI", 10))
-        self.lb.pack(fill="both", expand=True, padx=14, pady=(2, 8))
-        self.admin_box = ttk.Frame(self)
-        self.admin_box.pack(fill="x", padx=14)
-        ttk.Label(self.admin_box, text="Add a friend").pack(anchor="w")
-        row = ttk.Frame(self.admin_box)
-        row.pack(fill="x", pady=(2, 6))
+        tk.Label(self, textvariable=self.title_var, font=T.font(19, "bold"), fg=T.TEXT, bg=T.CARD).pack(
+            anchor="w", padx=24, pady=(20, 8))
+        label(self, "Members", 13, fg=T.MUTED).pack(anchor="w", padx=24)
+        self.lb = _listbox(self, height=9)
+        self.lb.pack(fill="both", expand=True, padx=24, pady=(4, 10))
+        self.admin_box = tk.Frame(self, bg=T.CARD)
+        self.admin_box.pack(fill="x", padx=24)
+        label(self.admin_box, "Add a friend", 13, fg=T.MUTED).pack(anchor="w")
+        row = tk.Frame(self.admin_box, bg=T.CARD)
+        row.pack(fill="x", pady=(4, 8))
         self.combo = ttk.Combobox(row, state="readonly")
-        self.combo.pack(side="left", fill="x", expand=True)
-        ttk.Button(row, text="Add", command=self.add).pack(side="left", padx=(6, 0))
-        ttk.Button(self.admin_box, text="Remove selected member", command=self.remove).pack(fill="x")
-        ttk.Button(self, text="Leave group", command=self.leave).pack(fill="x", padx=14, pady=12)
-        self.members = []
-        self.candidates = []
+        self.combo.pack(side="left", fill="x", expand=True, ipady=4)
+        PillButton(row, "Add", self.add, width=80, height=36, font_px=14).pack(side="left", padx=(8, 0))
+        PillButton(self.admin_box, "Remove selected member", self.remove, style="secondary", height=42,
+                   font_px=14).pack(fill="x")
+        PillButton(self, "Leave group", self.leave, style="danger", height=44, font_px=14).pack(
+            fill="x", padx=24, pady=16)
+        self.members, self.candidates = [], []
         self.refresh()
 
     def refresh(self):
@@ -393,10 +446,9 @@ class ManageGroupDialog(_Dialog):
         for m in g["members"]:
             tag = "  (admin)" if m["username"] == g["admin"] else ""
             you = "  (you)" if m["username"] == me else ""
-            self.lb.insert(tk.END, f"{m['fullname']} (@{m['username']}){tag}{you}")
-        is_admin = g["admin"] == me
-        if is_admin:
-            self.admin_box.pack(fill="x", padx=14)
+            self.lb.insert(tk.END, f"  {m['fullname']} (@{m['username']}){tag}{you}")
+        if g["admin"] == me:
+            self.admin_box.pack(fill="x", padx=24, before=self.winfo_children()[-1])
             self.candidates = [(u, n) for u, n, _o in self.ctrl.friend_list() if u not in self.members]
             self.combo["values"] = [f"{n} (@{u})" for u, n in self.candidates]
             self.combo.set("")
@@ -419,273 +471,450 @@ class ManageGroupDialog(_Dialog):
             self.destroy()
 
 
+class InfoDialog(_Dialog):
+    """Contact details, including the encryption-key fingerprint to compare in person."""
+
+    def __init__(self, parent, ctrl, username):
+        super().__init__(parent, "Contact info", 440, 470)
+        me = username == ctrl.me["username"]
+        name = ctrl.me["fullname"] if me else ctrl.name_of(username)
+        tk.Label(self, image=user_avatar(ctrl, username, 96, T.CARD), bg=T.CARD).pack(pady=(22, 8))
+        label(self, name, 20, "bold").pack()
+        label(self, "@" + username, 14, fg=T.MUTED).pack()
+        bio = ctrl.bio_of(username)
+        if bio:
+            label(self, bio, 14, fg=T.TEXT2, wraplength=380).pack(pady=(8, 0))
+        tk.Frame(self, bg=T.LINE, height=1).pack(fill="x", padx=24, pady=16)
+        label(self, "Encryption key fingerprint", 13, "semibold", T.MUTED).pack(anchor="w", padx=24)
+        key = ctrl.identity.public_key_b64 if me else ctrl.peer_keys.get(username, "")
+        tk.Label(self, text=fingerprint(key) or "not available yet", font=("Consolas", 14), fg=T.BLUE_HI,
+                 bg=T.CARD, wraplength=390, justify="left").pack(anchor="w", padx=24, pady=(4, 6))
+        label(self, "Compare this with your contact (in person or by phone). If it matches on both "
+                    "screens, nobody is intercepting your chat.", 12, fg=T.MUTED, wraplength=390, justify="left"
+              ).pack(anchor="w", padx=24)
+        PillButton(self, "Close", self.destroy, style="secondary", width=392, height=44, font_px=14).pack(pady=18)
+
+
+class EmojiPicker(tk.Toplevel):
+    def __init__(self, parent, entry, x, y):
+        super().__init__(parent)
+        self.overrideredirect(True)
+        self.configure(bg=T.LINE)
+        self.entry = entry
+        frame = tk.Frame(self, bg=T.CARD)
+        frame.pack(padx=1, pady=1)
+        fam = "Segoe UI Emoji" if "Segoe UI Emoji" in tkfont.families() else T.family()
+        for i, e in enumerate(EMOJIS):
+            b = tk.Label(frame, text=e, font=(fam, -22), bg=T.CARD, fg=T.TEXT, cursor="hand2", width=2)
+            b.grid(row=i // 10, column=i % 10, padx=2, pady=2)
+            b.bind("<Button-1>", lambda _e, e=e: self.pick(e))
+            b.bind("<Enter>", lambda _e, b=b: b.configure(bg=T.HOVER))
+            b.bind("<Leave>", lambda _e, b=b: b.configure(bg=T.CARD))
+        self.update_idletasks()
+        self.geometry(f"+{max(0, x - self.winfo_reqwidth() + 40)}+{max(0, y - self.winfo_reqheight() - 10)}")
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.bind("<FocusOut>", lambda _e: self.after(120, self._maybe_close))
+        self.after(50, self.focus_force)
+
+    def _maybe_close(self):
+        try:
+            if self.focus_displayof() is None:
+                self.destroy()
+        except tk.TclError:
+            pass
+
+    def pick(self, e):
+        self.entry.insert(tk.INSERT, e)
+        self.entry.focus_set()
+        self.destroy()
+
+
+# --------------------------------------------------------------------------- #
+# Settings / my profile
+# --------------------------------------------------------------------------- #
+class SettingsPage(tk.Frame):
+    def __init__(self, parent, main):
+        super().__init__(parent, bg=T.BG)
+        self.main, self.ctrl = main, main.ctrl
+        scroll = ScrollFrame(self, T.BG)
+        scroll.pack(fill="both", expand=True)
+        body = tk.Frame(scroll.body, bg=T.BG)
+        body.pack(anchor="n", padx=40, pady=30)
+        self.name_var, self.bio_var = tk.StringVar(), tk.StringVar()
+        self.old_var, self.new_var, self.conf_var = tk.StringVar(), tk.StringVar(), tk.StringVar()
+
+        tk.Label(body, text="Settings", font=T.font(28, "bold"), fg=T.TEXT, bg=T.BG).pack(anchor="w")
+        tk.Label(body, text="Your profile is what your friends see.", font=T.font(14), fg=T.MUTED, bg=T.BG
+                 ).pack(anchor="w", pady=(2, 18))
+
+        # ---- profile card
+        card = self._card(body)
+        top = tk.Frame(card, bg=T.CARD)
+        top.pack(fill="x")
+        self.avatar_label = tk.Label(top, bg=T.CARD)
+        self.avatar_label.pack(side="left", padx=(0, 22))
+        side = tk.Frame(top, bg=T.CARD)
+        side.pack(side="left", anchor="w")
+        self.title_label = tk.Label(side, font=T.font(21, "bold"), fg=T.TEXT, bg=T.CARD)
+        self.title_label.pack(anchor="w")
+        self.user_label = tk.Label(side, font=T.font(14), fg=T.MUTED, bg=T.CARD)
+        self.user_label.pack(anchor="w", pady=(0, 10))
+        btns = tk.Frame(side, bg=T.CARD)
+        btns.pack(anchor="w")
+        self.change_btn = PillButton(btns, "Change photo", self.choose_avatar, width=160, height=40, icon="camera",
+                                     font_px=14)
+        self.change_btn.pack(side="left")
+        self.remove_btn = PillButton(btns, "Remove", self.remove_avatar, style="secondary", width=100, height=40,
+                                     font_px=14)
+        self.remove_btn.pack(side="left", padx=(8, 0))
+        tk.Label(side, text="JPG, PNG, GIF, BMP or WebP. It is cropped to a square.", font=T.font(12), fg=T.DIM,
+                 bg=T.CARD).pack(anchor="w", pady=(8, 0))
+        self.photo_msg = tk.Label(card, text="", font=T.font(13), bg=T.CARD, fg=T.RED, anchor="w")
+        self.photo_msg.pack(anchor="w", pady=(8, 0))
+
+        # ---- details
+        card = self._card(body)
+        tk.Label(card, text="Your details", font=T.font(17, "semibold"), fg=T.TEXT, bg=T.CARD).pack(anchor="w", pady=(0, 10))
+        self.name_field = self._field(card, "Full name", self.name_var, icon="user")
+        tk.Label(card, text="Username (cannot be changed)", font=T.font(13, "semibold"), fg=T.MUTED, bg=T.CARD
+                 ).pack(anchor="w", pady=(0, 3))
+        self.username_var = tk.StringVar()
+        PillEntry(card, textvariable=self.username_var, width=440, height=46, radius=14, state="disabled").pack(
+            anchor="w", pady=(0, 12))
+        tk.Label(card, text="Status (shown under your name)", font=T.font(13, "semibold"), fg=T.MUTED, bg=T.CARD
+                 ).pack(anchor="w", pady=(0, 3))
+        self.bio_field = PillEntry(card, textvariable=self.bio_var, width=440, height=46, radius=14,
+                                   placeholder="Good vibes. Great conversations.")
+        self.bio_field.pack(anchor="w")
+        self.count_label = tk.Label(card, font=T.font(12), fg=T.DIM, bg=T.CARD, anchor="e", width=60)
+        self.count_label.pack(anchor="w")
+        self.bio_var.trace_add("write", lambda *_: self._count())
+        self.save_btn = PillButton(card, "Save changes", self.save_profile, width=200, height=46)
+        self.save_btn.pack(anchor="w", pady=(8, 0))
+        self.profile_msg = tk.Label(card, text="", font=T.font(13), bg=T.CARD, fg=T.GREEN, anchor="w")
+        self.profile_msg.pack(anchor="w", pady=(8, 0))
+
+        # ---- password
+        card = self._card(body)
+        tk.Label(card, text="Change password", font=T.font(17, "semibold"), fg=T.TEXT, bg=T.CARD).pack(anchor="w", pady=(0, 10))
+        self._field(card, "Current password", self.old_var, show="\u2022", icon="lock")
+        self._field(card, "New password", self.new_var, show="\u2022", icon="lock")
+        self._field(card, "Confirm new password", self.conf_var, show="\u2022", icon="lock")
+        self.pw_btn = PillButton(card, "Update password", self.change_password, style="secondary", width=200, height=46)
+        self.pw_btn.pack(anchor="w", pady=(4, 0))
+        self.pw_msg = tk.Label(card, text="", font=T.font(13), bg=T.CARD, fg=T.GREEN, anchor="w")
+        self.pw_msg.pack(anchor="w", pady=(8, 0))
+
+        # ---- account
+        card = self._card(body)
+        tk.Label(card, text="Account", font=T.font(17, "semibold"), fg=T.TEXT, bg=T.CARD).pack(anchor="w", pady=(0, 8))
+        self.server_label = tk.Label(card, font=T.font(13), fg=T.MUTED, bg=T.CARD, justify="left")
+        self.server_label.pack(anchor="w")
+        tk.Label(card, text="Messages are encrypted on this computer with AES-256-GCM before they are sent.",
+                 font=T.font(13), fg=T.MUTED, bg=T.CARD, wraplength=440, justify="left").pack(anchor="w", pady=(6, 14))
+        PillButton(card, "Sign out", main.app.logout, style="danger", width=200, height=46, icon="logout").pack(anchor="w")
+        self.refresh()
+
+    @staticmethod
+    def _card(parent):
+        outer = tk.Frame(parent, bg=T.CARD, highlightthickness=1, highlightbackground=T.LINE)
+        outer.pack(fill="x", pady=(0, 18))
+        inner = tk.Frame(outer, bg=T.CARD)
+        inner.pack(fill="x", padx=26, pady=22)
+        return inner
+
+    @staticmethod
+    def _field(parent, text, var, show=None, icon=None):
+        tk.Label(parent, text=text, font=T.font(13, "semibold"), fg=T.MUTED, bg=T.CARD).pack(anchor="w", pady=(0, 3))
+        f = PillEntry(parent, textvariable=var, show=show, width=440, height=46, radius=14, icon=icon)
+        f.pack(anchor="w", pady=(0, 12))
+        return f
+
+    def _count(self):
+        n = len(self.bio_var.get())
+        self.count_label.configure(text=f"{n} / {P.MAX_BIO}", fg=T.RED if n > P.MAX_BIO else T.DIM)
+
+    def refresh(self):
+        ctrl = self.ctrl
+        me = ctrl.me
+        if not me:
+            return
+        self.avatar_label.configure(image=user_avatar(ctrl, me["username"], 118, T.CARD, True))
+        self.title_label.configure(text=me["fullname"])
+        self.user_label.configure(text="@" + me["username"])
+        self.username_var.set("@" + me["username"])
+        self.remove_btn.configure(state="normal" if ctrl.avatar_version(me["username"]) else "disabled")
+        self.server_label.configure(text=f"Connected to  {ctrl.network.address if ctrl.network else ''}")
+
+    def load_fields(self):
+        """Fill the form with the saved details (done when the page is opened)."""
+        me = self.ctrl.me
+        self.name_var.set(me["fullname"])
+        self.bio_var.set(me.get("bio", ""))
+        for v in (self.old_var, self.new_var, self.conf_var):
+            v.set("")
+        for lb in (self.photo_msg, self.profile_msg, self.pw_msg):
+            lb.configure(text="")
+        self._count()
+        self.refresh()
+
+    # ---- actions ---------------------------------------------------------------- #
+    def choose_avatar(self):
+        path = filedialog.askopenfilename(parent=self, title="Choose a profile picture", filetypes=IMAGE_TYPES)
+        if path:
+            self.upload_avatar(path)
+
+    def upload_avatar(self, path):
+        try:
+            data = images.prepare_avatar(path)
+        except images.AvatarError as exc:
+            self.photo_msg.configure(text=str(exc), fg=T.RED)
+            return False
+        self.photo_msg.configure(text="Uploading...", fg=T.MUTED)
+        return self.ctrl.set_avatar(data)
+
+    def remove_avatar(self):
+        self.photo_msg.configure(text="Removing...", fg=T.MUTED)
+        self.ctrl.set_avatar("")
+
+    def save_profile(self):
+        self.profile_msg.configure(text="Saving...", fg=T.MUTED)
+        self.ctrl.update_profile(self.name_var.get(), self.bio_var.get())
+
+    def change_password(self):
+        self.pw_msg.configure(text="Updating...", fg=T.MUTED)
+        self.ctrl.change_password(self.old_var.get(), self.new_var.get(), self.conf_var.get())
+
+    def on_profile_result(self, ev):
+        ok = ev.get("ok")
+        if self.photo_msg.cget("text") in ("Uploading...", "Removing..."):
+            self.photo_msg.configure(text="Photo updated." if ok else ev.get("message", ""),
+                                     fg=T.GREEN if ok else T.RED)
+        if self.profile_msg.cget("text") == "Saving...":
+            self.profile_msg.configure(text="Saved." if ok else ev.get("message", ""), fg=T.GREEN if ok else T.RED)
+        elif not ok:
+            self.profile_msg.configure(text=ev.get("message", ""), fg=T.RED)
+        self.refresh()
+
+    def on_password_result(self, ev):
+        ok = ev.get("ok")
+        self.pw_msg.configure(text=ev.get("message", ""), fg=T.GREEN if ok else T.RED)
+        if ok:
+            for v in (self.old_var, self.new_var, self.conf_var):
+                v.set("")
+
+
 # --------------------------------------------------------------------------- #
 # Main chat screen
 # --------------------------------------------------------------------------- #
-class MainFrame(ttk.Frame):
+class MainFrame(tk.Frame):
     def __init__(self, app):
-        super().__init__(app)
+        super().__init__(app, bg=T.BG)
         self.app, self.ctrl = app, app.ctrl
-        self.friend_keys, self.group_ids, self.online_keys, self.request_keys = [], [], [], []
+        self.view = "chats"
+        self.show_info = True
+        self._connection_lost = False
 
-        top = ttk.Frame(self, padding=(16, 12), style="Card.TFrame")
-        top.pack(fill="x")
-        self.me_label = ttk.Label(top, font=("Segoe UI", 10, "bold"), foreground=ACCENT, background=PANEL)
-        self.me_label.pack(side="left")
-        ttk.Button(top, text="Logout", command=app.logout).pack(side="right")
-        self.conn_label = ttk.Label(top, text="● Connected", foreground=OK_COLOR, background=PANEL,
-                                    font=("Segoe UI", 9, "bold"))
-        self.conn_label.pack(side="right", padx=12)
-        self.inbox_badge = ttk.Label(top, text="", foreground="#67e8f9", background=PANEL,
-                                     font=("Segoe UI", 9, "bold"))
-        self.inbox_badge.pack(side="right", padx=12)
-
-        body = ttk.PanedWindow(self, orient="horizontal")
-        body.pack(fill="both", expand=True, padx=8, pady=(0, 4))
-        left = ttk.Frame(body, width=300, style="Panel.TFrame")
-        right = ttk.Frame(body, style="Panel.TFrame", padding=12)
-        body.add(left, weight=0)
-        body.add(right, weight=1)
-
-        nb = ttk.Notebook(left)
-        nb.pack(fill="both", expand=True)
-        friends_tab, groups_tab, online_tab = (ttk.Frame(nb, padding=8, style="Panel.TFrame") for _ in range(3))
-        nb.add(friends_tab, text="Friends")
-        nb.add(groups_tab, text="Groups")
-        nb.add(online_tab, text="Online")
-        self.notebook = nb
-
-        # --- friends tab
-        self.req_label = ttk.Label(friends_tab, text="Friend requests", font=("Segoe UI", 9, "bold"))
-        self.req_label.pack(anchor="w")
-        self.req_lb = tk.Listbox(friends_tab, height=3, exportselection=False, bg=FIELD, fg=TEXT, selectbackground=ACCENT_DARK, selectforeground="white", relief="flat", highlightthickness=1, highlightbackground=PANEL_ALT, font=("Segoe UI", 9))
-        self.req_lb.pack(fill="x")
-        rb = ttk.Frame(friends_tab)
-        rb.pack(fill="x", pady=(2, 8))
-        ttk.Button(rb, text="Accept", command=lambda: self.answer_request(True)).pack(side="left", expand=True, fill="x")
-        ttk.Button(rb, text="Decline", command=lambda: self.answer_request(False)).pack(side="left", expand=True, fill="x")
-        ttk.Label(friends_tab, text="Friends", font=("Segoe UI", 9, "bold")).pack(anchor="w")
-        self.friend_lb = tk.Listbox(friends_tab, exportselection=False, bg=FIELD, fg=TEXT, selectbackground=ACCENT_DARK, selectforeground="white", relief="flat", highlightthickness=1, highlightbackground=PANEL_ALT, font=("Segoe UI", 9))
-        self.friend_lb.pack(fill="both", expand=True)
-        self.friend_lb.bind("<<ListboxSelect>>", self.pick_friend)
-        fb = ttk.Frame(friends_tab)
-        fb.pack(fill="x", pady=(4, 0))
-        ttk.Button(fb, text="Add friend...", command=self.add_friend).pack(side="left", expand=True, fill="x")
-        ttk.Button(fb, text="Remove", command=self.remove_friend).pack(side="left", expand=True, fill="x")
-
-        # --- groups tab
-        self.group_lb = tk.Listbox(groups_tab, exportselection=False, bg=FIELD, fg=TEXT, selectbackground=ACCENT_DARK, selectforeground="white", relief="flat", highlightthickness=1, highlightbackground=PANEL_ALT, font=("Segoe UI", 9))
-        self.group_lb.pack(fill="both", expand=True)
-        self.group_lb.bind("<<ListboxSelect>>", self.pick_group)
-        gb = ttk.Frame(groups_tab)
-        gb.pack(fill="x", pady=(4, 0))
-        ttk.Button(gb, text="New group...", command=self.new_group).pack(side="left", expand=True, fill="x")
-        ttk.Button(gb, text="Manage", command=self.manage_group).pack(side="left", expand=True, fill="x")
-
-        # --- online tab
-        ttk.Label(online_tab, text="Everyone online right now").pack(anchor="w")
-        self.online_lb = tk.Listbox(online_tab, exportselection=False, bg=FIELD, fg=TEXT, selectbackground=ACCENT_DARK, selectforeground="white", relief="flat", highlightthickness=1, highlightbackground=PANEL_ALT, font=("Segoe UI", 9))
-        self.online_lb.pack(fill="both", expand=True)
-        ttk.Button(online_tab, text="Send friend request", command=self.request_selected_online).pack(
-            fill="x", pady=(4, 0))
-
-        # --- chat area
-        self.title_var = tk.StringVar(value="Select a friend or group to start chatting")
-        ttk.Label(right, textvariable=self.title_var, font=("Segoe UI", 12, "bold"),
-                  padding=(10, 10), background=PANEL, foreground=TEXT).pack(fill="x")
-        box = ttk.Frame(right)
-        box.pack(fill="both", expand=True)
-        self.text = tk.Text(box, state="disabled", wrap="word", bg=BG, fg=TEXT, insertbackground=TEXT,
-                            relief="flat", padx=14, pady=12, font=("Segoe UI", 10),
-                            selectbackground=ACCENT_DARK, highlightthickness=1, highlightbackground=PANEL_ALT)
-        sb = ttk.Scrollbar(box, command=self.text.yview)
-        self.text.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        self.text.pack(side="left", fill="both", expand=True)
-        # Readable, modern chat typography with distinct sender labels and message panels.
-        self.text.tag_configure("meta_me", foreground="#67d8ff", font=("Segoe UI Semibold", 9),
-                                justify="right", lmargin1=100, lmargin2=100, rmargin=18,
-                                spacing1=13, spacing3=4)
-        self.text.tag_configure("meta_other", foreground="#a9bad1", font=("Segoe UI Semibold", 9),
-                                lmargin1=18, lmargin2=18, rmargin=100, spacing1=13, spacing3=4)
-        self.text.tag_configure("body_me", foreground="#f0f9ff", background="#164e70",
-                                font=("Segoe UI", 11), justify="right", lmargin1=100,
-                                lmargin2=100, rmargin=18, spacing1=4, spacing3=9,
-                                borderwidth=0, wrap="word")
-        self.text.tag_configure("body_other", foreground="#edf4ff", background="#1c2b40",
-                                font=("Segoe UI", 11), lmargin1=18, lmargin2=18,
-                                rmargin=100, spacing1=4, spacing3=9, borderwidth=0,
-                                wrap="word")
-        self.text.tag_configure("bad", foreground=BAD_COLOR, background="#3a1e30")
-        self.text.tag_configure("chat_empty", foreground=MUTED, font=("Segoe UI", 11), justify="center")
-
-        entry_row = ttk.Frame(right, padding=(0, 6, 0, 0))
-        entry_row.pack(fill="x")
-        self.entry = ttk.Entry(entry_row)
-        self.entry.pack(side="left", fill="x", expand=True)
-        self.entry.bind("<Return>", lambda e: self.send())
-        self.send_btn = ttk.Button(entry_row, text="Send message  ➤", command=self.send, style="Accent.TButton")
-        self.send_btn.pack(side="left", padx=(6, 0))
-
-        self.status = tk.StringVar()
-        self.status_label = ttk.Label(self, textvariable=self.status, padding=(12, 7), foreground=MUTED, background=BG)
-        self.status_label.pack(fill="x")
-
-        self.me_label.configure(text=f"Signed in as {self.ctrl.me['fullname']} (@{self.ctrl.me['username']})")
+        self.sidebar = Sidebar(self, self)
+        self.sidebar.pack(side="left", fill="y")
+        tk.Frame(self, bg=T.LINE, width=1).pack(side="left", fill="y")
+        self.info = InfoPane(self, self)
+        self.info_line = tk.Frame(self, bg=T.LINE, width=1)
+        self.chat = ChatPane(self, self)
+        self.entry = self.chat.entry
+        self.settings = SettingsPage(self, self)
+        self.toast_widget = Toast(self)
+        self.bind("<Configure>", lambda _e: self._layout())
+        self._layout()
         self.refresh_all()
 
-    # ---- refresh -------------------------------------------------------- #
+    # ---- layout --------------------------------------------------------------- #
+    def _layout(self):
+        for w in (self.info, self.info_line, self.chat, self.settings):
+            w.pack_forget()
+        if self.view == "settings":
+            self.settings.pack(side="left", fill="both", expand=True)
+            return
+        room = self.winfo_width() >= SIDEBAR_W + INFO_W + 440 or self.winfo_width() <= 1
+        if self.show_info and room:
+            self.info.pack(side="right", fill="y")
+            self.info_line.pack(side="right", fill="y")
+        self.chat.pack(side="left", fill="both", expand=True)
+
+    def toast(self, text, bad=False):
+        self.toast_widget.show(text, bad)
+
+    # ---- refresh ---------------------------------------------------------------- #
     def refresh_all(self):
-        self.refresh_requests()
-        self.refresh_friends()
-        self.refresh_groups()
-        self.refresh_online()
-        self.refresh_unread_badge()
-        self.render_conversation()
+        self.sidebar.refresh()
+        self.chat.refresh()
+        self.info.draw()
+        self.settings.refresh()
 
-    def refresh_unread_badge(self):
-        total = sum(max(0, int(count)) for count in self.ctrl.unread.values())
-        self.inbox_badge.configure(text=(f"●  {total} UNREAD MESSAGE{'S' if total != 1 else ''}" if total else "✓  ALL CAUGHT UP"))
+    def total_unread(self):
+        return sum(max(0, int(n)) for k, n in self.ctrl.unread.items() if not self.ctrl.is_muted(k))
 
-    @staticmethod
-    def _fill(listbox, rows, selected_index=None):
-        listbox.delete(0, tk.END)
-        for r in rows:
-            listbox.insert(tk.END, r)
-        if selected_index is not None:
-            listbox.selection_set(selected_index)
+    def refresh_unread(self):
+        self.sidebar.refresh()
+        self.info.draw()
 
-    def _unread(self, key):
-        """Make unread conversations impossible to miss in the conversation list."""
-        n = self.ctrl.unread.get(key, 0)
-        return f"   ● {n} UNREAD" if n else ""
+    def on_conversation(self, key):
+        self.sidebar.refresh_list()
+        if key == self.ctrl.current:
+            self.chat.render_messages(stick=False)
+            self.chat.draw_header()
+            self.info.draw()
 
-    def refresh_requests(self):
-        reqs = self.ctrl.requests_in
-        self.request_keys = [r["username"] for r in reqs]
-        self._fill(self.req_lb, [f"{r['fullname']} (@{r['username']})" for r in reqs])
-        self.req_label.configure(text=f"Friend requests ({len(reqs)})" if reqs else "Friend requests")
+    def on_profile(self, username=None):
+        self.refresh_all()
 
-    def refresh_friends(self):
-        rows = self.ctrl.friend_list()
-        self.friend_keys = [u for u, _n, _o in rows]
-        sel = self.friend_keys.index(self.ctrl.current[3:]) if (
-            self.ctrl.current and self.ctrl.current.startswith("dm:")
-            and self.ctrl.current[3:] in self.friend_keys) else None
-        self._fill(self.friend_lb,
-                   [f"{'●' if o else '○'} {n} (@{u}){self._unread(dm_key(u))}" for u, n, o in rows], sel)
-        for i, (u, _name, _online) in enumerate(rows):
-            if self.ctrl.unread.get(dm_key(u), 0):
-                self.friend_lb.itemconfig(i, foreground="#67e8f9", background="#153047")
-        self.refresh_unread_badge()
+    # ---- navigation ------------------------------------------------------------- #
+    def set_view(self, view):
+        if view == self.view:
+            return
+        self.view = view
+        self.sidebar.search_var.set("")
+        if view == "settings":
+            self.settings.load_fields()
+        self.sidebar.refresh()
+        self._layout()
 
-    def refresh_groups(self):
-        groups = self.ctrl.group_list()
-        self.group_ids = [g["group_id"] for g in groups]
-        sel = self.group_ids.index(int(self.ctrl.current[6:])) if (
-            self.ctrl.current and self.ctrl.current.startswith("group:")
-            and int(self.ctrl.current[6:]) in self.group_ids) else None
-        self._fill(self.group_lb, [f"{g['name']}  [{len(g['members'])}]{self._unread(group_key(g['group_id']))}"
-                                   for g in groups], sel)
-        for i, g in enumerate(groups):
-            if self.ctrl.unread.get(group_key(g['group_id']), 0):
-                self.group_lb.itemconfig(i, foreground="#67e8f9", background="#153047")
-        self.refresh_unread_badge()
+    def open_conversation(self, key):
+        if self.view in ("settings", "calls"):
+            self.view = "chats"
+            self._layout()
+        self.ctrl.open_conversation(key)
+        self.refresh_all()
+        self.entry.focus_set()
 
-    def refresh_online(self):
-        rows = self.ctrl.online_list()
-        self.online_keys = [u for u, _n in rows]
-        self._fill(self.online_lb, [f"{n} (@{u})" for u, n in rows])
+    def close_conversation(self):
+        self.ctrl.current = None
+        self.refresh_all()
 
-    def render_conversation(self):
-        key = self.ctrl.current
-        self.title_var.set(self.ctrl.title_for(key) if key else "Select a friend or group to start chatting")
-        t = self.text
-        t.configure(state="normal")
-        t.delete("1.0", tk.END)
-        if key:
-            messages = self.ctrl.conversation(key)
-            if not messages:
-                t.insert(tk.END, "\n\n\n  Your conversation starts here\n  Send a message to say hello.", "chat_empty")
-            me = self.ctrl.me["username"]
-            for m in messages:
-                mine = m["from"] == me
-                who = "YOU" if mine else self.ctrl.name_of(m["from"])
-                meta_tag = "meta_me" if mine else "meta_other"
-                body_tag = "body_me" if mine else "body_other"
-                t.insert(tk.END, f"{who}   ·   {local_time(m['timestamp'])}\n", meta_tag)
-                tags = (body_tag,) + (() if m["ok"] else ("bad",))
-                # Preserve user text exactly while keeping the colored message panel inset.
-                t.insert(tk.END, f"  {m['text']}  \n", tags)
-        t.configure(state="disabled")
-        t.see(tk.END)
-        state = "normal" if key else "disabled"
-        self.entry.configure(state=state)
-        self.send_btn.configure(state=state)
+    def toggle_info(self):
+        self.show_info = not self.show_info
+        self._layout()
 
-    # ---- user actions ---------------------------------------------------- #
-    def pick_friend(self, _e=None):
-        sel = self.friend_lb.curselection()
-        if sel:
-            self.group_lb.selection_clear(0, tk.END)
-            self.ctrl.open_conversation(dm_key(self.friend_keys[sel[0]]))
-            self.entry.focus_set()
+    # ---- actions used by the panels ---------------------------------------------- #
+    def call_unavailable(self):
+        self.toast("Voice and video calls are not available yet.")
 
-    def pick_group(self, _e=None):
-        sel = self.group_lb.curselection()
-        if sel:
-            self.friend_lb.selection_clear(0, tk.END)
-            self.ctrl.open_conversation(group_key(self.group_ids[sel[0]]))
-            self.entry.focus_set()
+    def attach_unavailable(self):
+        self.toast("Sending photos and files is not available yet.")
 
-    def send(self):
-        text = self.entry.get()
-        if self.ctrl.send_text(text):
-            self.entry.delete(0, tk.END)
+    media_unavailable = attach_unavailable
 
     def add_friend(self):
         self.app.find_dialog = AddFriendDialog(self, self.ctrl)
 
-    def remove_friend(self):
-        sel = self.friend_lb.curselection()
-        if sel and messagebox.askyesno("Remove friend", "Remove this friend?", parent=self):
-            self.ctrl.remove_friend(self.friend_keys[sel[0]])
-
-    def answer_request(self, accept):
-        sel = self.req_lb.curselection()
-        if sel:
-            self.ctrl.respond_request(self.request_keys[sel[0]], accept)
-
-    def request_selected_online(self):
-        sel = self.online_lb.curselection()
-        if not sel:
-            return
-        user = self.online_keys[sel[0]]
-        if user in self.ctrl.friends:
-            self.set_status("You are already friends.")
-        else:
-            self.ctrl.send_friend_request(user)
-
     def new_group(self):
         if not self.ctrl.friends:
-            self.set_status("Add some friends first - groups are made from your friends.", bad=True)
+            self.toast("Add some friends first - groups are made from your friends.", bad=True)
             return
         CreateGroupDialog(self, self.ctrl)
 
-    def manage_group(self):
-        sel = self.group_lb.curselection()
-        if not sel:
-            self.set_status("Select a group first.", bad=True)
+    def manage_group(self, gid):
+        self.app.manage_dialog = ManageGroupDialog(self, self.ctrl, gid)
+
+    def manage_current_group(self):
+        if self.ctrl.current and self.ctrl.current.startswith("group:"):
+            self.manage_group(int(self.ctrl.current[6:]))
+
+    def leave_current_group(self):
+        key = self.ctrl.current
+        if key and key.startswith("group:") and messagebox.askyesno("Leave group", "Leave this group?", parent=self):
+            self.ctrl.group_leave(int(key[6:]))
+
+    def block_current(self):
+        key = self.ctrl.current
+        if key and key.startswith("dm:"):
+            name = self.ctrl.name_of(key[3:])
+            if messagebox.askyesno("Block contact", f"Block {name}?\n\nThey will be removed from your friends and "
+                                   "can no longer message you. You can add them again later.", parent=self):
+                self.ctrl.remove_friend(key[3:])
+
+    def set_muted(self, key, muted):
+        self.ctrl.set_muted(key, muted)
+        self.toast("Notifications muted." if muted else "Notifications on.")
+
+    def clear_chat(self):
+        key = self.ctrl.current
+        if key and messagebox.askyesno("Clear chat", "Clear this chat on this computer?\n\nThe messages stay on "
+                                       "the server and your friend still has them.", parent=self):
+            self.ctrl.clear_chat(key)
+
+    def choose_wallpaper(self):
+        menu = tk.Menu(self, tearoff=0, bg=T.CARD, fg=T.TEXT, activebackground=T.BLUE, activeforeground="#ffffff",
+                       bd=0, font=T.font(14))
+        names = {"doodle": "Doodles", "plain": "Plain navy", "ocean": "Ocean glow", "midnight": "Midnight"}
+        for key, text in names.items():
+            menu.add_command(label=text, command=lambda k=key: self._set_wallpaper(k))
+        x, y = self.winfo_pointerx(), self.winfo_pointery()
+        try:
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
+
+    def _set_wallpaper(self, kind):
+        self.ctrl.prefs.set_wallpaper(self.ctrl.me["username"], kind)
+        self.chat.render_messages(stick=False)
+
+    def show_chat_menu(self):
+        key = self.ctrl.current
+        if not key:
             return
-        self.app.manage_dialog = ManageGroupDialog(self, self.ctrl, self.group_ids[sel[0]])
+        menu = tk.Menu(self, tearoff=0, bg=T.CARD, fg=T.TEXT, activebackground=T.BLUE, activeforeground="#ffffff",
+                       bd=0, font=T.font(14))
+        menu.add_command(label="Contact info" if key.startswith("dm:") else "Group info", command=self.show_info_dialog)
+        menu.add_command(label="Show / hide details panel", command=self.toggle_info)
+        muted = self.ctrl.is_muted(key)
+        menu.add_command(label="Unmute notifications" if muted else "Mute notifications",
+                         command=lambda: self.set_muted(key, not muted))
+        menu.add_command(label="Clear chat", command=self.clear_chat)
+        menu.add_separator()
+        if key.startswith("group:"):
+            menu.add_command(label="Manage group", command=self.manage_current_group)
+            menu.add_command(label="Leave group", command=self.leave_current_group)
+        else:
+            menu.add_command(label="Block contact", command=self.block_current)
+        try:
+            menu.tk_popup(self.winfo_pointerx(), self.winfo_pointery())
+        finally:
+            menu.grab_release()
 
-    def set_status(self, text, bad=False):
-        self.status.set(text)
-        self.status_label.configure(foreground=BAD_COLOR if bad else MUTED)
+    def show_app_menu(self):
+        menu = tk.Menu(self, tearoff=0, bg=T.CARD, fg=T.TEXT, activebackground=T.BLUE, activeforeground="#ffffff",
+                       bd=0, font=T.font(14))
+        menu.add_command(label="My profile", command=lambda: self.set_view("settings"))
+        menu.add_command(label="Add friend", command=self.add_friend)
+        menu.add_separator()
+        menu.add_command(label="Sign out", command=self.app.logout)
+        try:
+            menu.tk_popup(self.winfo_pointerx(), self.winfo_pointery())
+        finally:
+            menu.grab_release()
 
+    def show_emoji(self):
+        if not self.ctrl.current:
+            return
+        EmojiPicker(self, self.entry, self.winfo_pointerx(), self.winfo_pointery())
+
+    def show_info_dialog(self):
+        key = self.ctrl.current
+        if key and key.startswith("dm:"):
+            InfoDialog(self, self.ctrl, key[3:])
+        elif key:
+            self.show_info = True
+            self._layout()
+
+    # ---- connection ---------------------------------------------------------------- #
     def set_connection(self, text):
         ok = text.lower().startswith("connected")
-        self.conn_label.configure(text=text, foreground=OK_COLOR if ok else BAD_COLOR)
+        if ok and self._connection_lost:
+            self.toast("Back online.")
+        elif not ok:
+            self.toast(text, bad=True)
+        self._connection_lost = not ok
 
 
 # --------------------------------------------------------------------------- #
@@ -695,9 +924,11 @@ class App(tk.Tk):
     def __init__(self, controller=None):
         super().__init__()
         self.title(APP_TITLE)
-        self.geometry("1020x660")
-        self.minsize(820, 520)
-        self.configure(bg=BG)
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w, h = min(1320, sw - 60), min(820, sh - 100)
+        self.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 2 - 20)}")
+        self.minsize(min(940, w), min(600, h))
+        self.configure(bg=T.BG)
         self._setup_theme()
         self.ctrl = controller or ChatController()
         self.ctrl.on_update = self.on_update
@@ -712,55 +943,15 @@ class App(tk.Tk):
     def _setup_theme(self):
         style = ttk.Style(self)
         style.theme_use("clam" if "clam" in style.theme_names() else "default")
-        self.configure(bg=BG)
-        style.configure("TFrame", background=BG)
-        style.configure("Panel.TFrame", background=PANEL)
-        style.configure("Card.TFrame", background=PANEL, relief="flat")
-        style.configure("TLabel", background=BG, foreground=TEXT, font=("Segoe UI", 9))
-        # Labels that sit on a card/panel must use the panel colour, otherwise they show as darker boxes.
-        style.configure("FieldLabel.TLabel", background=PANEL, foreground=MUTED, font=("Segoe UI", 9, "bold"))
-        style.configure("Hint.TLabel", background=PANEL, foreground=MUTED, font=("Segoe UI", 8))
-        style.configure("Status.TLabel", background=PANEL, font=("Segoe UI", 9))
-        style.configure("Muted.TLabel", background=PANEL, foreground=MUTED, font=("Segoe UI", 8, "bold"))
-        style.configure("Brand.TLabel", background=PANEL, foreground=TEXT, font=("Segoe UI", 22, "bold"))
-        style.configure("BrandMark.TLabel", background=ACCENT_DARK, foreground="white", font=("Segoe UI", 18, "bold"), padding=(14, 5))
-        style.configure("TButton", background=PANEL_ALT, foreground=TEXT, padding=(10, 7), borderwidth=0,
-                        bordercolor=PANEL_ALT, lightcolor=PANEL_ALT, darkcolor=PANEL_ALT, focuscolor=PANEL_ALT,
-                        font=("Segoe UI", 9, "bold"))
-        style.map("TButton", background=[("active", ACCENT_DARK), ("pressed", ACCENT_DARK), ("disabled", PANEL)],
-                  foreground=[("active", "white"), ("disabled", MUTED)],
-                  bordercolor=[("active", ACCENT_DARK)], lightcolor=[("active", ACCENT_DARK)],
-                  darkcolor=[("active", ACCENT_DARK)])
-        style.configure("Accent.TButton", background=ACCENT_DARK, foreground="white",
-                        bordercolor=ACCENT_DARK, lightcolor=ACCENT_DARK, darkcolor=ACCENT_DARK, focuscolor=ACCENT_DARK)
-        style.map("Accent.TButton", background=[("active", ACCENT), ("pressed", ACCENT_DARK), ("disabled", PANEL_ALT)],
-                  bordercolor=[("active", ACCENT)], lightcolor=[("active", ACCENT)], darkcolor=[("active", ACCENT)])
-        style.configure("TEntry", fieldbackground=FIELD, foreground=TEXT, insertcolor=TEXT,
-                        bordercolor=PANEL_ALT, lightcolor=PANEL_ALT, darkcolor=PANEL_ALT, padding=7)
-        style.map("TEntry", bordercolor=[("focus", ACCENT_DARK)], lightcolor=[("focus", ACCENT_DARK)],
-                  darkcolor=[("focus", ACCENT_DARK)])
-        # The "clam" theme paints a white highlight around notebooks and tabs; recolour every edge.
-        style.configure("TNotebook", background=PANEL, borderwidth=0, bordercolor=PANEL,
-                        lightcolor=PANEL, darkcolor=PANEL, tabmargins=(0, 0, 0, 0))
-        style.configure("TNotebook.Tab", background=PANEL_ALT, foreground=MUTED, padding=(14, 8),
-                        borderwidth=0, bordercolor=PANEL, lightcolor=PANEL_ALT, darkcolor=PANEL_ALT,
-                        focuscolor=PANEL_ALT, font=("Segoe UI", 9, "bold"))
-        style.map("TNotebook.Tab",
-                  background=[("selected", ACCENT_DARK), ("active", PANEL)],
-                  foreground=[("selected", "white"), ("active", TEXT)],
-                  bordercolor=[("selected", PANEL), ("!selected", PANEL)],
-                  lightcolor=[("selected", ACCENT_DARK), ("!selected", PANEL_ALT)],
-                  darkcolor=[("selected", ACCENT_DARK), ("!selected", PANEL_ALT)])
-        style.configure("TCheckbutton", background=PANEL, foreground=TEXT, focuscolor=PANEL)
-        style.configure("Dlg.TCheckbutton", background=BG, foreground=TEXT, focuscolor=BG,
-                        font=("Segoe UI", 9, "bold"))
-        style.map("Dlg.TCheckbutton", background=[("active", BG)], foreground=[("active", ACCENT)])
-        style.configure("TPanedwindow", background=BG)
-        style.configure("TScrollbar", background=PANEL_ALT, troughcolor=BG, borderwidth=0, arrowsize=12,
-                        bordercolor=PANEL_ALT, lightcolor=PANEL_ALT, darkcolor=PANEL_ALT)
-        style.configure("TCombobox", fieldbackground=FIELD, background=PANEL_ALT, foreground=TEXT,
-                        arrowcolor=ACCENT, bordercolor=PANEL_ALT, lightcolor=PANEL_ALT, darkcolor=PANEL_ALT)
-        style.map("TCombobox", fieldbackground=[("readonly", FIELD)], foreground=[("readonly", TEXT)])
+        style.configure("Dlg.TCheckbutton", background=T.CARD, foreground=T.TEXT, focuscolor=T.CARD,
+                        font=T.font(13, "semibold"))
+        style.map("Dlg.TCheckbutton", background=[("active", T.CARD)], foreground=[("active", T.BLUE_HI)])
+        style.configure("TCombobox", fieldbackground=T.FIELD, background=T.FIELD, foreground=T.TEXT,
+                        arrowcolor=T.BLUE_HI, bordercolor=T.FIELD_LINE, lightcolor=T.FIELD, darkcolor=T.FIELD)
+        style.map("TCombobox", fieldbackground=[("readonly", T.FIELD)], foreground=[("readonly", T.TEXT)])
+        self.option_add("*TCombobox*Listbox.background", T.FIELD)
+        self.option_add("*TCombobox*Listbox.foreground", T.TEXT)
+        self.option_add("*TCombobox*Listbox.selectBackground", T.BLUE)
 
     def _poll(self):
         try:
@@ -786,6 +977,8 @@ class App(tk.Tk):
         self._clear()
         self.main = MainFrame(self)
         self.main.pack(fill="both", expand=True)
+        if not self.ctrl.me.get("avatar_ver"):
+            self.main.toast("Tip: add a profile photo in Settings.")
 
     def logout(self):
         self.ctrl.logout()
@@ -794,19 +987,20 @@ class App(tk.Tk):
         self.ctrl.shutdown()
         self.destroy()
 
+    def _refresh_find_dialog(self):
+        dlg = self.find_dialog
+        if dlg is None:
+            return
+        if dlg.winfo_exists():
+            dlg.refresh()
+        else:
+            self.find_dialog = None
+
     # ---- controller callbacks ---------------------------------------- #
     def on_update(self, topic, payload=None):
-        self._handle_update(topic, payload)
-        dlg = self.find_dialog
-        if topic in ("user_list", "state", "requests", "presence") and dlg is not None:
-            try:
-                if dlg.winfo_exists():
-                    dlg.refresh()
-            except tk.TclError:
-                self.find_dialog = None
-
-    def _handle_update(self, topic, payload=None):
         login, main = self.login, self.main
+        if topic in ("user_list", "state", "requests", "presence", "profile"):
+            self._refresh_find_dialog()
         if topic == "status" and login:
             login.set_status(payload, ok=True)
         elif topic == "auth_error":
@@ -815,8 +1009,7 @@ class App(tk.Tk):
                 login.set_status(payload)
         elif topic == "register_result" and login:
             if payload.get("ok"):
-                login.registered(payload.get("username", ""), payload["message"],
-                                 payload.get("passphrase", ""))
+                login.registered(payload.get("username", ""), payload["message"], payload.get("passphrase", ""))
             else:
                 login.set_busy(False)
                 login.set_status(payload["message"])
@@ -829,28 +1022,26 @@ class App(tk.Tk):
             self.show_login(payload)
         elif main is None:
             return
-        elif topic == "state":
+        elif topic in ("state", "groups", "requests", "profile", "avatar"):
             main.refresh_all()
-        elif topic == "presence":
-            main.refresh_friends()
-            main.refresh_online()
-        elif topic == "requests":
-            main.refresh_requests()
-        elif topic == "groups":
-            main.refresh_groups()
-            if self.manage_dialog is not None and self.manage_dialog.winfo_exists():
+            if topic == "groups" and self.manage_dialog is not None and self.manage_dialog.winfo_exists():
                 self.manage_dialog.refresh()
-            if self.ctrl.current is None:
-                main.render_conversation()
+        elif topic == "presence":
+            main.sidebar.refresh_list()
+            main.chat.draw_header()
+            main.info.draw()
         elif topic == "unread":
-            main.refresh_friends()
-            main.refresh_groups()
+            main.refresh_unread()
         elif topic == "conversation":
-            if payload == self.ctrl.current:
-                main.render_conversation()
+            main.on_conversation(payload)
+        elif topic == "profile_result":
+            main.settings.on_profile_result(payload)
+            main.refresh_all()
+        elif topic == "password_result":
+            main.settings.on_password_result(payload)
         elif topic == "notice":
-            main.set_status(payload)
+            main.toast(payload)
         elif topic == "error":
-            main.set_status(payload, bad=True)
+            main.toast(payload, bad=True)
         elif topic == "connection":
             main.set_connection(payload)

@@ -1,5 +1,6 @@
 """Phase 3 - GUI smoke test: drives the real Tkinter window (needs a display; use xvfb-run on a headless box)."""
 import gc
+import os
 import time
 import types
 
@@ -7,7 +8,7 @@ import pytest
 
 tk = pytest.importorskip("tkinter")
 
-from client.controller import ChatController, dm_key  # noqa: E402
+from client.controller import ChatController, dm_key, group_key  # noqa: E402
 from server.database import Database  # noqa: E402
 from tests.helpers import ServerThread  # noqa: E402
 from tests.test_client import PW, Peer  # noqa: E402
@@ -54,11 +55,16 @@ def pump(app, cond, timeout=8.0, what="condition"):
     raise AssertionError(f"timed out waiting for {what}")
 
 
-def widget_text(app):
-    return app.main.text.get("1.0", "end")
+def chat_texts(app):
+    """Texts of the messages currently drawn in the conversation view."""
+    return [it["text"] for it in app.main.chat.view.items if it["type"] == "msg"]
 
 
-def test_full_gui_flow(env):
+def list_kinds(app):
+    return [r["kind"] for r in app.main.sidebar.list.rows]
+
+
+def test_full_gui_flow(env, tmp_path):
     app, srv = env.app, env.srv
     login = app.login
     # ---- register through the form -------------------------------------------------
@@ -72,7 +78,7 @@ def test_full_gui_flow(env):
     login.r_conf.set(PW)
     login.do_register()
     pump(app, lambda: "Registration completed successfully." in login.status.get(), what="registration message")
-    assert login.l_user.get() == "alice"                       # switched to the login tab, prefilled
+    assert login.l_user.get() == "alice" and login.tab == 0     # switched to the login tab, prefilled
     # ---- the automatically created passphrase is shown to the user ----------------------
     phrase = login.new_passphrase
     assert phrase and len(phrase.split("-")) == 5
@@ -96,39 +102,51 @@ def test_full_gui_flow(env):
     login.do_login()
     pump(app, lambda: app.main is not None, what="main window")
     main = app.main
-    assert "Alice Adamu" in main.me_label.cget("text")
+    assert main.view == "chats" and app.ctrl.me["fullname"] == "Alice Adamu"
+    assert list_kinds(app) == ["empty"]                         # no conversations yet
 
     # ---- a second user (controller only) befriends alice ---------------------------------
     bob = Peer(srv)
     assert bob.register("bob", "Bob Bello")["ok"]
     bob.login("bob")
     pump(app, lambda: "bob" in app.ctrl.online_users, what="bob shows as online")
-    assert main.online_lb.get(0).startswith("Bob Bello")
-    main.online_lb.selection_set(0)
-    main.request_selected_online()                              # alice -> bob via the Online tab
+    main.set_view("contacts")                                   # the Contacts tab lists everyone online
+    assert "online" in list_kinds(app)
+    row = next(r for r in main.sidebar.list.rows if r["kind"] == "online")
+    assert row["name"] == "Bob Bello"
+    main.sidebar._action(row, "request")                        # alice -> bob via the "add" button
     bob.wait(lambda: bob.ctrl.requests_in, what="bob gets request")
     bob.ctrl.respond_request("alice", True)
-    pump(app, lambda: main.friend_lb.size() == 1, what="friend appears")
-    assert "Bob Bello" in main.friend_lb.get(0) and main.friend_lb.get(0).startswith("\u25cf")   # online marker
+    pump(app, lambda: "friend" in list_kinds(app), what="friend appears")
+    friend = next(r for r in main.sidebar.list.rows if r["kind"] == "friend")
+    assert friend["name"] == "Bob Bello" and friend["online"] is True
 
     # ---- chat ----------------------------------------------------------------------------
-    main.friend_lb.selection_set(0)
-    main.pick_friend()
-    assert "Bob Bello" in main.title_var.get()
+    main.sidebar._select(friend)
+    assert main.view == "contacts" and app.ctrl.current == "dm:bob"
+    main.set_view("chats")
+    assert "chat" in list_kinds(app)
     main.entry.insert(0, "Hello from the GUI")
-    main.send()
-    pump(app, lambda: "Hello from the GUI" in widget_text(app), what="own message rendered")
+    main.chat.send()
+    pump(app, lambda: "Hello from the GUI" in chat_texts(app), what="own message rendered")
     bob.ctrl.open_conversation(dm_key("alice"))
     bob.wait(lambda: "Hello from the GUI" in bob.texts(dm_key("alice")), what="bob decrypts")
-    bob.ctrl.send_text("Reply from Bob")
-    pump(app, lambda: "Reply from Bob" in widget_text(app), what="reply rendered")
+    bob.ctrl.send_text("Reply from Bob https://example.com/page")
+    pump(app, lambda: "Reply from Bob https://example.com/page" in chat_texts(app), what="reply rendered")
+    assert app.ctrl.shared_links("dm:bob") == [("https://example.com/page", "example.com")]
+    chat_row = next(r for r in main.sidebar.list.rows if r["kind"] == "chat")
+    assert chat_row["last"]["text"].startswith("Reply from Bob")        # preview in the chat list
 
-    # ---- unread badge when another conversation is not open --------------------------------
-    app.ctrl.current = None
-    main.render_conversation()
+    # ---- unread badge when the conversation is not open ------------------------------------
+    main.close_conversation()
+    assert app.ctrl.current is None and chat_texts(app) == []
     bob.ctrl.send_text("Are you there?")
-    pump(app, lambda: "1 UNREAD" in main.friend_lb.get(0), what="unread marker in the list")
-    pump(app, lambda: "1 UNREAD MESSAGE" in main.inbox_badge.cget("text"), what="unread badge in the header")
+    pump(app, lambda: main.total_unread() == 1, what="unread count")
+    pump(app, lambda: next(r for r in main.sidebar.list.rows if r["kind"] == "chat")["unread"] == 1,
+         what="unread badge in the list")
+    app.ctrl.set_muted("dm:bob", True)                           # muted chats do not count
+    assert main.total_unread() == 0
+    app.ctrl.set_muted("dm:bob", False)
 
     # ---- groups through the dialogs -------------------------------------------------------
     from client.gui import CreateGroupDialog, ManageGroupDialog
@@ -136,16 +154,64 @@ def test_full_gui_flow(env):
     dlg.name.set("Study Circle")
     dlg.lb.selection_set(0)
     dlg.create()
-    pump(app, lambda: main.group_lb.size() == 1, what="group listed")
-    assert "Study Circle" in main.group_lb.get(0)
-    main.group_lb.selection_set(0)
-    main.pick_group()
+    pump(app, lambda: app.ctrl.groups, what="group created")
+    gkey = group_key(next(iter(app.ctrl.groups)))
+    main.open_conversation(gkey)
     main.entry.insert(0, "Welcome to the group")
-    main.send()
-    pump(app, lambda: "Welcome to the group" in widget_text(app), what="group message rendered")
+    main.chat.send()
+    pump(app, lambda: "Welcome to the group" in chat_texts(app), what="group message rendered")
     manage = ManageGroupDialog(main, app.ctrl, next(iter(app.ctrl.groups)))
     assert "(admin)" in manage.lb.get(0) and "(you)" in manage.lb.get(0)
     manage.destroy()
+    main.set_view("groups")
+    assert "group" in list_kinds(app)
+
+    # ---- "Add friend" = Find people: everyone listed, search narrows, request from the list ---
+    carol = Peer(srv)
+    assert carol.register("carol", "Carol Musa")["ok"]
+    from client.gui import AddFriendDialog
+    main.add_friend()
+    find = app.find_dialog
+    assert isinstance(find, AddFriendDialog)
+    pump(app, lambda: find.rows == ["bob", "carol"], what="everyone listed")
+    assert "Friends" in find.lb.get(0) and str(find.btn._state) == "disabled"     # bob is already a friend
+    find.query.set("mus")
+    pump(app, lambda: find.rows == ["carol"], what="search narrows the list")
+    find.lb.selection_set(0)
+    find._update_button()
+    assert str(find.btn._state) == "normal"
+    find.send()
+    pump(app, lambda: app.ctrl.relationship("carol") == "request_sent", what="request sent from the list")
+    pump(app, lambda: "Request sent" in find.lb.get(0), what="row shows the new status")
+    find.destroy()
+
+    # ---- my profile: details, picture, password -------------------------------------------
+    main.set_view("settings")
+    page = main.settings
+    assert page.name_var.get() == "Alice Adamu" and page.username_var.get() == "@alice"
+    page.name_var.set("Alice A. Adamu")
+    page.bio_var.set("Good vibes.")
+    page.save_btn.command()
+    pump(app, lambda: "Saved." in page.profile_msg.cget("text"), what="profile saved")
+    bob.wait(lambda: bob.ctrl.friends["alice"]["fullname"] == "Alice A. Adamu", what="bob sees the new name")
+    assert bob.ctrl.bio_of("alice") == "Good vibes."
+    from PIL import Image
+    pic = tmp_path / "me.png"
+    Image.new("RGBA", (640, 400), (20, 120, 220, 255)).save(pic)
+    assert page.upload_avatar(str(pic))
+    pump(app, lambda: "Photo updated." in page.photo_msg.cget("text"), what="photo uploaded")
+    assert app.ctrl.avatar_version("alice") and str(page.remove_btn.cget("state")) == "normal"
+    bob.wait(lambda: bob.ctrl.avatar_version("alice") != "", what="bob sees a picture exists")
+    bad = tmp_path / "notes.txt"
+    bad.write_text("not a picture")
+    assert page.upload_avatar(str(bad)) is False and "could not be opened" in page.photo_msg.cget("text")
+    page.remove_avatar()
+    pump(app, lambda: app.ctrl.avatar_version("alice") == "", what="photo removed")
+    page.old_var.set(PW)
+    page.new_var.set("BrandNew123")
+    page.conf_var.set("BrandNew123")
+    page.change_password()
+    pump(app, lambda: "Password changed." in page.pw_msg.cget("text"), what="password changed")
 
     # ---- logout returns to the login window ----------------------------------------------
     app.logout()
@@ -157,66 +223,3 @@ def test_selftest_entry_point_opens_and_closes_the_window(env):
     env.app = types.SimpleNamespace(close=lambda: None)         # already closed; keep the fixture teardown quiet
     from client.main import main
     assert main(["--selftest"]) == 0
-
-
-def gui_login(app, srv, username, fullname):
-    """Register and sign in through the real forms; returns the passphrase."""
-    login = app.login
-    login.server.set(srv.address)
-    login.r_name.set(fullname)
-    login.r_user.set(username)
-    login.r_pass.set(PW)
-    login.r_conf.set(PW)
-    login.do_register()
-    pump(app, lambda: login.passphrase_dialog is not None, what="passphrase dialog")
-    dlg = login.passphrase_dialog
-    dlg.saved.set(True)
-    dlg._toggle()
-    dlg.destroy()
-    login.l_pass.set(PW)
-    login.do_login()
-    pump(app, lambda: app.main is not None, what="main window")
-
-
-def test_add_friend_dialog_lists_everyone_and_has_a_search_bar(env):
-    app, srv = env.app, env.srv
-    others = []
-    for name, full in (("bob", "Bob Bello"), ("carol", "Carol Musa"), ("dave", "Dave Danjuma")):
-        p = Peer(srv)
-        assert p.register(name, full)["ok"]
-        others.append(p)
-    others[0].login("bob")                                    # bob online, carol and dave offline
-    gui_login(app, srv, "alice", "Alice Adamu")
-    main = app.main
-    main.add_friend()                                         # the "Add friend..." button
-    dlg = app.find_dialog
-    # everybody is listed straight away - no searching needed
-    pump(app, lambda: dlg.lb.size() == 3, what="all users listed")
-    rows = [dlg.lb.get(i) for i in range(3)]
-    assert "Bob Bello" in rows[0] and "Carol Musa" in rows[1] and "Dave Danjuma" in rows[2]
-    assert rows[0].lstrip().startswith("\u25cf") and rows[1].lstrip().startswith("\u25cb")   # online / offline
-    assert "3 people" in dlg.count.cget("text")
-    assert str(dlg.btn.cget("state")) == "disabled"            # nothing selected yet
-    # the search bar narrows the list
-    dlg.query.set("mus")
-    dlg._search()
-    pump(app, lambda: dlg.lb.size() == 1, what="filtered list")
-    assert "Carol Musa" in dlg.lb.get(0) and 'matching "mus"' in dlg.count.cget("text")
-    dlg.query.set("zzz")
-    dlg._search()
-    pump(app, lambda: dlg.lb.size() == 0, what="no match")
-    assert "No one matches" in dlg.count.cget("text")
-    dlg.query.set("")
-    dlg._search()
-    pump(app, lambda: dlg.lb.size() == 3, what="full list again")
-    # pick Bob and send the request from the list
-    dlg.lb.selection_set(0)
-    dlg._update_button()
-    assert str(dlg.btn.cget("state")) == "normal"
-    dlg.send()
-    others[0].wait(lambda: others[0].ctrl.requests_in, what="bob receives the request")
-    pump(app, lambda: "Request sent" in dlg.lb.get(0), what="row shows Request sent")
-    assert str(dlg.btn.cget("state")) == "disabled"            # cannot send twice
-    others[0].ctrl.respond_request("alice", True)
-    pump(app, lambda: "Friends" in dlg.lb.get(0), what="row shows Friends")
-    dlg.destroy()

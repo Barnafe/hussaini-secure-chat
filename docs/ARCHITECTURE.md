@@ -18,14 +18,16 @@
 | `server/app.py` | TCP listener, thread per client, sessions, login/register, presence, friends, groups, routing, offline queue |
 | `client/network.py` | plain TCP socket on a background thread, keep-alive pings, event queue, reconnect with back-off |
 | `client/controller.py` | all client logic: encryption, decryption, unread counts, history merge |
-| `client/gui.py` | login/registration (with the passphrase window), chat window, Add-friend (find people) and group dialogs |
-| `run_server.py` | starts the server; `--show-db` prints the stored password hashes and ciphertext |
+| `client/gui.py` | login window, dialogs, settings / profile page, main window |
+| `client/panels.py`, `widgets.py` | sidebar, conversation and info panels; rounded Pillow-drawn widgets |
+| `client/theme.py`, `icons.py`, `images.py` | palette and fonts, vector icons, avatars / bubbles / wallpapers |
+| `client/prefs.py` | per-computer preferences (`client_prefs.json`) |
 
 ## Database schema
 
 | Table | Columns |
 |---|---|
-| `users` | user_id, username (unique), password (bcrypt hash), fullname, public_key (X25519, base64), date_created |
+| `users` | user_id, username (unique), password (bcrypt hash), fullname, public_key (X25519, base64), bio (status line), avatar (base64 JPEG/PNG), avatar_ver (short hash of the picture), date_created |
 | `messages` | message_id, sender, receiver, encrypted_message, timestamp, delivered |
 | `friend_requests` | request_id, from_user, to_user, created |
 | `friendships` | user_a, user_b (alphabetical pair), created |
@@ -50,7 +52,6 @@ Client → server
 | `register` | username, password, confirm, fullname, public_key |
 | `login` / `logout` | username, password, public_key / – |
 | `ping` | – (answered with `pong`; sent every 15 s) |
-| `user_search` | query (empty = list everybody) |
 | `friend_request` | to |
 | `friend_respond` | from, accept |
 | `friend_remove` | user |
@@ -60,6 +61,11 @@ Client → server
 | `group_create` | name, members[] |
 | `group_add` / `group_remove` | group_id, username |
 | `group_leave` | group_id |
+| `user_search` | query (empty = list everybody) |
+| `profile_update` | fullname, bio |
+| `avatar_set` | data (base64 JPEG/PNG, `''` removes it) |
+| `avatar_get` | username (answered with `avatar`) |
+| `password_change` | old, new, confirm |
 
 Server → client
 
@@ -68,10 +74,14 @@ Server → client
 | `register_result`, `login_result`, `pong` | `ok` + message |
 | `state` | friends (with online flag), requests, groups, everyone online |
 | `presence` | a user came online / went offline |
-| `user_list` | users (username, fullname, online, relationship), more |
 | `friend_request_in`, `request_sent`, `request_cleared`, `friend_added`, `friend_removed` | friend changes |
 | `message`, `group_message` | ciphertext + sender + id + timestamp (`queued` = delivered from the offline queue) |
 | `history` | ordered ciphertexts for one conversation |
+| `user_list` | users (username, fullname, online, relationship, avatar_ver), more |
+| `last_message` | newest ciphertext of each conversation, sent after login so the chat list can show a preview (never counts as unread) |
+| `profile_result`, `password_result` | outcome of the user's own profile / password request |
+| `profile` | someone's name, status line or picture version changed (sent to everyone online) |
+| `avatar` | a picture (`avatar_ver` + base64 data) |
 | `group_update`, `group_removed` | group membership changes |
 | `notice`, `error`, `kicked`, `logged_out` | feedback |
 
@@ -109,5 +119,7 @@ Server → client
 | Report | Implementation | Why |
 |---|---|---|
 | Shared chat passphrase (report limitation) | Personal auto-generated passphrase + X25519 key agreement | each user gets their own secret; the server holds only public keys |
-| One-to-one chat | plus friends (searchable "Find people" list), online list, groups, offline delivery, persistent history | requested extensions |
+| One-to-one chat | plus friends, online list, groups, offline delivery | requested extensions |
 | PyCryptodome for AES (Table in 3.10) | `cryptography` library (AES-256-GCM, X25519, HKDF) | one library covers AES-GCM and the X25519 key agreement; update the 3.10 table in the report |
+| "Shared secret" style key handling | per-user passphrase, public keys stored on the server | see above |
+

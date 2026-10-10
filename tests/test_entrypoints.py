@@ -8,7 +8,7 @@ import time
 
 import yaml
 
-from server.database import Database
+from shared import protocol as P
 from tests.helpers import PASSWORD, TClient, new_identity
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -166,6 +166,8 @@ def test_assemble_script_builds_the_release_folder(tmp_path):
 
 def test_show_db_prints_hashes_and_ciphertext_only(tmp_path):
     """run_server.py --show-db is the proof, for the demo, that the server cannot read chats."""
+    import subprocess
+    from server.database import Database
     db_file = str(tmp_path / "show.db")
     db = Database(sqlite_path=db_file)
     db.create_user("alice", "$2b$12$abcdefghijklmnopqrstuvwxyz", "Alice A", "PUBLICKEY1")

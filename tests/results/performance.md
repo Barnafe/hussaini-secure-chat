@@ -2,8 +2,8 @@
 
 | Test | Result |
 |---|---|
-| Sequential delivery latency (200 msgs) | mean_ms: 0.1, p95_ms: 0.11, max_ms: 4.33, database: sqlite |
-| Concurrent clients (20 online, 10 pairs x 30 msgs) | messages: 300, delivered: 300, seconds: 0.03, msgs_per_sec: 10800.9, database: sqlite |
-| Simultaneous sessions | clients_online: 30, login_seconds_total: 0.04 |
-| Cryptography cost | aes_gcm_encrypt+decrypt_200chars_ms: 0.0048, passphrase_to_keypair_pbkdf2_600k_ms: 118.9, bcrypt_cost12_hash_ms: 228.3, bcrypt_cost12_verify_ms: 234.2 |
+| Sequential delivery latency (200 msgs) | mean_ms: 0.33, p95_ms: 0.44, max_ms: 8.91, database: sqlite |
+| Concurrent clients (20 online, 10 pairs x 30 msgs) | messages: 300, delivered: 300, seconds: 0.13, msgs_per_sec: 2378.8, database: sqlite |
+| Simultaneous sessions | clients_online: 30, login_seconds_total: 0.07 |
+| Cryptography cost | aes_gcm_encrypt+decrypt_200chars_ms: 0.0282, passphrase_to_keypair_pbkdf2_600k_ms: 167.9, bcrypt_cost12_hash_ms: 306.3, bcrypt_cost12_verify_ms: 301.7 |
 | Abrupt disconnects | ghost_clients: 20, server_still_routing: True |

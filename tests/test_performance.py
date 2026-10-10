@@ -51,7 +51,7 @@ def pct(values, p):
 
 
 def test_message_latency_sequential(srv):
-    alice, bob = make_user(srv.address, "alice"), make_user(srv.address, "bob")
+    alice, bob = make_user(srv.url, "alice"), make_user(srv.url, "bob")
     befriend(alice, bob)
     n, lat = 200, []
     for i in range(n):
@@ -72,7 +72,7 @@ def test_concurrent_clients_all_messages_delivered(srv):
     pairs, per_pair = 10, 30
     senders, receivers = [], []
     for i in range(pairs):
-        a, b = make_user(srv.address, f"sender{i}"), make_user(srv.address, f"recv{i}")
+        a, b = make_user(srv.url, f"sender{i}"), make_user(srv.url, f"recv{i}")
         befriend(a, b)
         senders.append(a)
         receivers.append(b)
@@ -116,9 +116,9 @@ def test_many_simultaneous_logins(srv):
     n = 30
     for i in range(n):
         from tests.helpers import register
-        assert register(srv.address, f"user{i}")["ok"]
+        assert register(srv.url, f"user{i}")["ok"]
     t0 = time.perf_counter()
-    clients = [__import__("tests.helpers", fromlist=["login"]).login(srv.address, f"user{i}") for i in range(n)]
+    clients = [__import__("tests.helpers", fromlist=["login"]).login(srv.url, f"user{i}") for i in range(n)]
     elapsed = time.perf_counter() - t0
     assert len(srv.chat.sessions) == n
     RESULTS["Simultaneous sessions"] = {"clients_online": n, "login_seconds_total": round(elapsed, 2)}
@@ -151,10 +151,10 @@ def test_crypto_cost():
 
 
 def test_server_survives_abrupt_client_disconnects(srv):
-    alice, bob = make_user(srv.address, "alice"), make_user(srv.address, "bob")
+    alice, bob = make_user(srv.url, "alice"), make_user(srv.url, "bob")
     befriend(alice, bob)
     for _ in range(20):                                              # clients that vanish mid-session
-        c = make_user(srv.address, f"ghost{_}")
+        c = make_user(srv.url, f"ghost{_}")
         c.close()
     alice.send(type="send_dm", to="bob", payload=enc_dm("alice", "bob", "still alive"))
     assert bob.expect("message")["from"] == "alice"

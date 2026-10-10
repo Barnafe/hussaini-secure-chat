@@ -10,20 +10,24 @@ and the JSON object always has a "type" field:
 
 Client -> server types
     register, login, logout, ping,
-    friend_request, friend_respond, friend_remove,
-    send_dm, send_group, history, user_search,
-    group_create, group_add, group_remove, group_leave
+    friend_request, friend_respond, friend_remove, user_search,
+    send_dm, send_group, history,
+    group_create, group_add, group_remove, group_leave,
+    profile_update, avatar_set, avatar_get, password_change
 
 Server -> client types
     register_result, login_result, pong, state, presence,
     friend_request_in, request_sent, request_cleared, friend_added, friend_removed,
     message, group_message, history, user_list,
     group_update, group_removed,
+    last_message (newest message of a conversation, sent after login for the chat list),
+    profile_result, profile (someone changed their profile), avatar, password_result,
     notice, error, kicked, logged_out
 """
 import json
 import re
 import select
+import socket
 import struct
 import time
 
@@ -34,6 +38,8 @@ MIN_PASSWORD = 8
 MAX_PASSWORD = 64
 MAX_PASSWORD_BYTES = 72          # bcrypt hard limit
 MAX_FULLNAME = 50
+MAX_BIO = 80                     # the short status line under a user's name
+MAX_AVATAR_CHARS = 60_000        # base64 text of a profile picture (the client sends ~10-25 KB)
 MAX_GROUP_NAME = 40
 MAX_GROUP_MEMBERS = 50
 MAX_PAYLOAD = 32_768             # max length of an encrypted message (text characters)
@@ -232,6 +238,52 @@ def validate_registration(username, password, confirm, fullname):
         return f"Full name must be at most {MAX_FULLNAME} characters."
     if not USERNAME_RE.match(username or ""):
         return "Username must be 3-20 characters: letters, numbers or underscore."
+    if not isinstance(password, str) or len(password) < MIN_PASSWORD:
+        return f"Password must be at least {MIN_PASSWORD} characters."
+    if len(password) > MAX_PASSWORD or len(password.encode("utf-8")) > MAX_PASSWORD_BYTES:
+        return f"Password must be at most {MAX_PASSWORD} characters."
+    if password != confirm:
+        return MSG_PASSWORD_MISMATCH
+    return None
+
+
+def validate_profile(fullname, bio):
+    """Return an error string, or None if the new name / status line are acceptable."""
+    if not isinstance(fullname, str) or not fullname.strip():
+        return "Full name is required."
+    if len(fullname.strip()) > MAX_FULLNAME:
+        return f"Full name must be at most {MAX_FULLNAME} characters."
+    if not isinstance(bio, str):
+        return "Status must be text."
+    if len(bio.strip()) > MAX_BIO:
+        return f"Status must be at most {MAX_BIO} characters."
+    return None
+
+
+_IMAGE_MAGIC = (b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n")      # JPEG, PNG
+
+
+def validate_avatar(value):
+    """Return an error string, or None if value is '' (remove) or a base64 JPEG/PNG of sane size."""
+    import base64
+    import binascii
+    if not isinstance(value, str):
+        return "Picture is invalid."
+    if value == "":
+        return None
+    if len(value) > MAX_AVATAR_CHARS:
+        return "That picture is too large."
+    try:
+        raw = base64.b64decode(value.encode("ascii"), validate=True)
+    except (binascii.Error, ValueError, UnicodeEncodeError):
+        return "Picture is invalid."
+    if not raw.startswith(_IMAGE_MAGIC):
+        return "Picture must be a JPEG or PNG image."
+    return None
+
+
+def validate_new_password(password, confirm):
+    """Same password rules as registration. Returns an error string or None."""
     if not isinstance(password, str) or len(password) < MIN_PASSWORD:
         return f"Password must be at least {MIN_PASSWORD} characters."
     if len(password) > MAX_PASSWORD or len(password.encode("utf-8")) > MAX_PASSWORD_BYTES:

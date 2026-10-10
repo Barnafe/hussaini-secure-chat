@@ -16,7 +16,6 @@ thread running ``ChatServer.handle_connection``. Frames are length-prefixed JSON
 (see shared/protocol.py).
 """
 import logging
-import os
 import socket
 import threading
 import time
@@ -79,10 +78,12 @@ class Connection:
 class Session:
     """One authenticated connection."""
 
-    def __init__(self, conn, username, fullname):
+    def __init__(self, conn, username, fullname, bio="", avatar_ver=""):
         self.conn = conn
         self.username = username
         self.fullname = fullname
+        self.bio = bio
+        self.avatar_ver = avatar_ver
         self.sent = deque()          # timestamps, for flood control
 
 
@@ -109,11 +110,15 @@ class ChatServer:
             "send_dm": self.on_send_dm,
             "send_group": self.on_send_group,
             "history": self.on_history,
-            "user_search": self.on_user_search,
             "group_create": self.on_group_create,
             "group_add": self.on_group_add,
             "group_remove": self.on_group_remove,
             "group_leave": self.on_group_leave,
+            "user_search": self.on_user_search,
+            "profile_update": self.on_profile_update,
+            "avatar_set": self.on_avatar_set,
+            "avatar_get": self.on_avatar_get,
+            "password_change": self.on_password_change,
         }
 
     # ------------------------------------------------------------------ #
@@ -220,6 +225,10 @@ class ChatServer:
     def _broadcast_presence(self, username, fullname, online):
         event = {"type": "presence", "username": username, "fullname": fullname, "online": online}
         with self.lock:
+            sess = self.sessions.get(username)
+            if sess is not None:
+                event["avatar_ver"] = sess.avatar_ver
+                event["bio"] = sess.bio
             targets = [s for s in self.sessions.values() if s.username != username]
         for s in targets:
             s.conn.send(event)
@@ -294,7 +303,7 @@ class ChatServer:
         if msg.get("public_key") != user["public_key"]:
             return fail(P.MSG_PASSPHRASE_BAD)
 
-        session = Session(conn, username, user["fullname"])
+        session = Session(conn, username, user["fullname"], user.get("bio", ""), user.get("avatar_ver", ""))
         with self.lock:
             old = self.sessions.get(username)         # one active session per user
             self.sessions[username] = session
@@ -304,9 +313,11 @@ class ChatServer:
                            "message": "You were logged out because your account logged in elsewhere."})
             old.conn.close()
         conn.send({"type": "login_result", "ok": True, "message": P.MSG_LOGIN_OK,
-                   "user": {"username": username, "fullname": user["fullname"]}})
+                   "user": {"username": username, "fullname": user["fullname"],
+                            "bio": session.bio, "avatar_ver": session.avatar_ver}})
         self._send_state(session)
         self._flush_offline(session)
+        self._send_previews(session)
         self._broadcast_presence(username, user["fullname"], True)
         log.info("%s logged in (%d online)", username, online)
         return session
@@ -314,7 +325,8 @@ class ChatServer:
     def _send_state(self, session):
         me = session.username
         with self.lock:
-            online = [{"username": s.username, "fullname": s.fullname}
+            online = [{"username": s.username, "fullname": s.fullname, "bio": s.bio,
+                       "avatar_ver": s.avatar_ver}
                       for s in self.sessions.values() if s.username != me]
         session.conn.send({
             "type": "state",
@@ -356,6 +368,91 @@ class ChatServer:
             if last is not None:
                 self.db.set_group_cursor(g["group_id"], me, last)
 
+    def _send_previews(self, session):
+        """Send the newest message of every conversation so the chat list can show a preview.
+
+        They are ordinary ciphertexts (the client decrypts them), sent as ``last_message``
+        events so that they never count as unread.
+        """
+        me = session.username
+        for f in self.db.friends_of(me):
+            rows = self.db.direct_history(me, f["username"], 1)
+            if rows:
+                session.conn.send(dict(self._dm_event(rows[-1]), type="last_message", kind="dm"))
+        for g in self.db.groups_for_user(me):
+            rows = self.db.group_history(g["group_id"], me, 1)
+            if rows:
+                session.conn.send(dict(self._group_event(rows[-1]), type="last_message", kind="group"))
+
+    # ------------------------------------------------------------------ #
+    # profile: name, status line, picture, password
+    # ------------------------------------------------------------------ #
+    def _profile_card(self, session):
+        return {"username": session.username, "fullname": session.fullname,
+                "bio": session.bio, "avatar_ver": session.avatar_ver}
+
+    def _announce_profile(self, session):
+        """Tell the owner (result) and everyone online (so friend lists and chats update live)."""
+        card = self._profile_card(session)
+        session.conn.send(dict(card, type="profile_result", ok=True, message="Profile updated."))
+        with self.lock:
+            others = [s for s in self.sessions.values() if s.username != session.username]
+        for s in others:
+            s.conn.send(dict(card, type="profile"))
+
+    def on_profile_update(self, session, msg):
+        conn = session.conn
+        if not self._allow(session):
+            return self._error(conn, "You are sending requests too fast. Slow down.")
+        fullname, bio = msg.get("fullname"), msg.get("bio", "")
+        error = P.validate_profile(fullname, bio)
+        if error:
+            conn.send({"type": "profile_result", "ok": False, "message": error})
+            return
+        fullname, bio = fullname.strip(), bio.strip()
+        self.db.update_profile(session.username, fullname, bio)
+        session.fullname, session.bio = fullname, bio
+        self._announce_profile(session)
+
+    def on_avatar_set(self, session, msg):
+        conn = session.conn
+        if not self._allow(session):
+            return self._error(conn, "You are sending requests too fast. Slow down.")
+        data = msg.get("data", "")
+        error = P.validate_avatar(data)
+        if error:
+            conn.send({"type": "profile_result", "ok": False, "message": error})
+            return
+        session.avatar_ver = self.db.set_avatar(session.username, data)
+        self._announce_profile(session)
+
+    def on_avatar_get(self, session, msg):
+        """Send someone's picture (clients ask only for pictures they have not cached yet)."""
+        user = P.normalize_username(msg.get("username"))
+        if not user:
+            return
+        ver, data = self.db.get_avatar(user)
+        session.conn.send({"type": "avatar", "username": user, "avatar_ver": ver, "data": data})
+
+    def on_password_change(self, session, msg):
+        conn = session.conn
+        old, new, confirm = msg.get("old"), msg.get("new"), msg.get("confirm")
+
+        def result(ok, text):
+            conn.send({"type": "password_result", "ok": ok, "message": text})
+
+        if self._locked(session.username):
+            return result(False, "Too many failed attempts. Please try again in a minute.")
+        user = self.db.get_user(session.username)
+        if not isinstance(old, str) or len(old) > 200 or not verify_password(old, user["password"]):
+            self._record_failure(session.username)
+            return result(False, "Your current password is not correct.")
+        error = P.validate_new_password(new, confirm)
+        if error:
+            return result(False, error)
+        self.db.set_password(session.username, hash_password(new, self.bcrypt_rounds))
+        result(True, "Password changed.")
+
     # ------------------------------------------------------------------ #
     # friends
     # ------------------------------------------------------------------ #
@@ -382,7 +479,7 @@ class ChatServer:
         conn.send({"type": "request_sent", "username": target})
         self._notice(conn, f"Friend request sent to {target}.")
         self._send_to(target, {"type": "friend_request_in", "username": me,
-                               "fullname": session.fullname})
+                               "fullname": session.fullname, "avatar_ver": session.avatar_ver})
 
     def on_user_search(self, session, msg):
         """"Find people": everybody except me (optionally filtered), with their relationship to me."""
@@ -400,14 +497,16 @@ class ChatServer:
             status = ("friend" if name in friends else "request_received" if name in incoming
                       else "request_sent" if name in outgoing else "none")
             users.append({"username": name, "fullname": r["fullname"], "status": status,
-                          "online": self.online_flag(name)})
+                          "online": self.online_flag(name),
+                          "avatar_ver": r.get("avatar_ver", "")})
         conn.send({"type": "user_list", "query": query, "users": users, "more": more})
 
     def _announce_friendship(self, a, b):
         """a and b are user rows (username, fullname, public_key)."""
         def card(u):
             return {"username": u["username"], "fullname": u["fullname"],
-                    "public_key": u.get("public_key", ""), "online": self.online_flag(u["username"])}
+                    "public_key": u.get("public_key", ""), "online": self.online_flag(u["username"]),
+                    "bio": u.get("bio", ""), "avatar_ver": u.get("avatar_ver", "")}
         self._send_to(a["username"], {"type": "friend_added", "user": card(b)})
         self._send_to(b["username"], {"type": "friend_added", "user": card(a)})
 
@@ -622,7 +721,7 @@ class TCPChatServer:
         self.chat = chat
         family = socket.AF_INET6 if ":" in host else socket.AF_INET
         self.listener = socket.socket(family, socket.SOCK_STREAM)
-        if os.name != "nt":                      # on Windows SO_REUSEADDR would allow port hijacking
+        if hasattr(socket, "SO_REUSEADDR") and not _is_windows():
             self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.listener.bind((host, port))
         self.listener.listen(128)
@@ -682,6 +781,13 @@ class TCPChatServer:
                 if not self._connections:
                     break
             time.sleep(0.02)
+
+    close = stop
+
+
+def _is_windows():
+    import os
+    return os.name == "nt"
 
 
 def start_server(chat, host, port):

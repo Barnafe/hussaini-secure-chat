@@ -52,7 +52,7 @@ Step 2  REGISTER Alice in window 1 (Full name Alice Adamu, username alice,
 Step 3  REGISTER Bob in window 2 (username bob).  Note his passphrase is
         different from Alice's.  "Different passphrases, yet they can chat."
 
-Step 4  Sign in both.  In Alice's window click FRIENDS > "Add friend...":
+Step 4  Sign in both.  In Alice's window click the "Add friend" button:
         everyone with an account is listed at once (no searching needed) and
         the search bar narrows the list.  Pick Bob, send the request, then
         accept it in Bob's window.

@@ -11,11 +11,14 @@ report (`ATBU_CHAPTERS_TEACHER.docx`).
 |---|---|
 | Accounts | Register (full name, username, password, confirm) and login. Passwords are hashed with **bcrypt**. Failed-login lockout after 5 tries. One active session per account. |
 | **Personal passphrase** | Created **automatically at registration** and shown once (copy / save to file). It is needed at every login and never leaves the computer. |
-| Friends | **Add friend...** opens a "Find people" list showing every user straight away (online/offline marker, relationship status) with a **search bar** to filter by name or username. Send a request, the other person accepts or declines; remove friends any time. |
+| **Profile** | Each user has a profile picture (any JPG/PNG/GIF/BMP/WebP, cropped to a square on the user's computer), an editable full name, a short status line and a change-password form (Settings). Friends see changes live. |
+| **ChatSphere look** | Dark-blue interface: sidebar (Chats / Contacts / Groups / Calls / Settings, search, chat list with previews and unread badges), conversation with bubbles, and a contact-info panel (shared links, mute, wallpaper, clear chat, block). |
+| Friends | **Add friend** opens a "Find people" list showing every user straight away (online/offline marker, relationship status) with a **search bar** to filter by name or username. Send a request, the other person accepts or declines; remove friends any time. |
 | History | Log out and log in again: your chats are still there (kept on the server as ciphertext, decrypted on your computer with your passphrase). Each chat reloads its latest 200 messages. |
 | Private chat | One-to-one chat between friends, real-time. |
 | Offline delivery | Messages to an offline friend are stored (encrypted) and delivered at their next login. |
 | Group chat | Groups made from your friends. Creator is admin (add / remove); anyone can leave. New members only see messages sent after they joined. |
+| History | Loaded from the database and decrypted on your machine. |
 | Encryption | AES-256-GCM (confidentiality **and** tamper detection). Keys come from X25519 key agreement between the two users' passphrase-derived key pairs. |
 | Reliability | Keep-alive pings, auto-reconnect + automatic re-login, flood control, idle clean-up. |
 | Database | **SQLite** only (`data/chat.db`). |
@@ -41,17 +44,19 @@ Hussaini/
 │   └── config.py            server settings
 ├── client/
 │   ├── network.py           background socket thread, pings, auto-reconnect
-│   ├── controller.py        all client logic (keys, encrypt/decrypt, state) - no GUI code
-│   ├── gui.py               Tkinter windows
+│   ├── controller.py        all client logic (keys, encrypt/decrypt, state, profiles) - no GUI code
+│   ├── gui.py               login screen, dialogs, settings/profile page, main window
+│   ├── panels.py            sidebar, conversation and contact-info panels
+│   ├── widgets.py           rounded buttons, entries, chat list, message view (Pillow + Tk)
+│   ├── theme.py             colours (from the design mock-up), fonts, image cache
+│   ├── icons.py             vector icons drawn with Pillow (no image files to ship)
+│   ├── images.py            profile-picture processing, avatars, bubbles, wallpapers
+│   ├── prefs.py             per-computer preferences (muted chats, wallpaper) -> client_prefs.json
 │   └── main.py              entry point (+ --selftest)
-├── packaging/               PyInstaller specs, release assembler, build smoke test,
-│   └── windows/             start-demo.bat, show-database.bat, README.txt, PRESENTATION_GUIDE.txt
+├── packaging/               PyInstaller specs, release assembler, build smoke test, Windows files
 ├── .github/workflows/build-windows.yml   builds + tests + packages the Windows zip
 ├── tests/                   pytest suite (section 5)
-└── docs/
-    ├── ARCHITECTURE.md                design notes, protocol table, DB schema
-    ├── GITHUB_AND_DELIVERY_GUIDE.md   push to GitHub, build, test and hand over, step by step
-    └── REPORT_NOTES.md                where the finished system differs from Chapters 1-3, limitations
+└── docs/ARCHITECTURE.md     design notes, protocol table, DB schema
 ```
 
 ## 2. Run it from source (VS Code)
@@ -70,14 +75,10 @@ python run_client.py              # terminal 2 (and a third terminal for a secon
 Or double-click `start-demo-from-source.bat` on Windows.
 
 In each client: **Server** `localhost:8765` → *Register* → copy/save the passphrase shown → *Login*
-(username, password, passphrase) → *Friends* tab → **Add friend...** → pick someone from the list → *Send friend request*
-→ the other user accepts in *Friends*.
+(username, password, passphrase) → *Online* tab → send a friend request → the other user accepts in *Friends*.
 
 Change the port or database location in `settings.txt` (or with `HUSSAINI_SERVER_PORT`, `HUSSAINI_DATABASE_FILE`, …).
 A different computer connects with `<server-ip>:8765` (the server prints its address when it starts).
-
-To see what the server really stores (bcrypt hashes and unreadable ciphertext), run
-`python run_server.py --show-db` (in the Windows package: double-click `show-database.bat`).
 
 ## 3. Build the Windows .exe files
 
@@ -123,15 +124,32 @@ pytest tests/test_security.py -v        # one phase
 | `test_keys.py` | passphrase format, key agreement, DM + group envelopes, outsiders cannot read |
 | `test_protocol.py` | framing over real sockets (split/partial/oversized frames), `host:port` parsing |
 | `test_settings.py` | settings.txt loading, validation messages, environment overrides |
-| `test_database.py` | users, public keys, friends, user search, offline queue, groups, thread safety, upgrade of old DBs |
-| `test_server.py` | registration/login rules, passphrase check, presence, friends, find-people search, DM, offline delivery, groups |
-| `test_client.py` | real clients end to end: auto-generated passphrase, find people, encryption, offline, reconnect |
-| `test_gui_smoke.py` | drives the real Tkinter window incl. the passphrase and Add-friend windows (skipped without a display) |
+| `test_database.py` | users, public keys, friends, offline queue, groups, thread safety, upgrade of old DBs |
+| `test_server.py` | registration/login rules, passphrase check, presence, friends, DM, offline delivery, groups |
+| `test_client.py` | real clients end to end: auto-generated passphrase, encryption, offline, reconnect |
+| `test_gui_smoke.py` | drives the real Tkinter window: register, passphrase window, friends, chat, unread, groups, profile photo / name / password (skipped without a display) |
+| `test_profile.py` | profile name, status line, picture upload/fetch/remove, password change, chat-list previews (server + database) |
+| `test_client_profile.py` | the controller side of the same features, plus mute / clear chat / shared links / list ordering |
+| `test_images.py` | every icon renders, profile pictures are cropped and shrunk to fit the server limit, bad files are refused |
 | `test_security.py` | wire sniffing shows only ciphertext, DB holds only ciphertext/hashes/public keys, forgery, SQL injection, garbage frames |
 | `test_performance.py` | latency, 20 concurrent clients, crypto cost → writes `tests/results/performance.md` |
-| `test_entrypoints.py` | `run_server.py` really starts/stops and `--show-db` works, packaging files and workflow are consistent, release assembly |
+| `test_entrypoints.py` | `run_server.py` really starts/stops, packaging files and workflow are consistent, release assembly |
 
 On a headless Linux box run the GUI test with `xvfb-run pytest tests/test_gui_smoke.py`.
+
+## 5b. Profile pictures and details
+
+Open **Settings** (left menu, or the menu icon at the top of the sidebar). *Change photo* accepts common image
+files; the picture is cropped to a centred square, shrunk to 256 x 256 and sent as a small JPEG (about 10-25 KB).
+Friends only receive a short version tag in their friend list and download the picture once when they first need
+it (`avatar_get`), so a long friend list never bloats a message. Name and status changes reach everyone who is
+online immediately; others see them at their next login.
+
+Local-only settings (muted chats, *Clear chat* cut-offs, chat wallpaper) are stored next to the program in
+`client_prefs.json` and never leave the computer. *Clear chat* hides the messages on this computer only.
+
+Not built yet (the buttons show a short notice): voice/video calls and sending photos or files. The *Media & Files*
+and *Shared Documents* boxes stay empty until file sending exists; *Shared Links* is filled from links in the chat.
 
 ## 6. Security notes and known limitations (good material for the report)
 
@@ -153,4 +171,5 @@ On a headless Linux box run the GUI test with `xvfb-run pytest tests/test_gui_sm
 | Client says **Connection failed.** | Server not running, wrong `host:port`, or a firewall is blocking the port. |
 | **That passphrase does not belong to this account.** | Use the passphrase shown when the account was registered. |
 | Server: *port already in use* | Another server is running, or change `server_port` in `settings.txt`. |
+| Window looks plain / `ModuleNotFoundError: PIL` | Run `pip install -r requirements.txt` (the new look needs Pillow). |
 | Old `data/chat.db` from version 3 | Accounts made before passphrases have no key and are refused at login. Delete `data/chat.db` and register again. |

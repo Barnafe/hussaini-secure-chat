@@ -31,9 +31,9 @@ def test_wire_traffic_contains_no_plaintext(srv):
     """A packet sniffer between clients and server sees only ciphertext."""
     sniffer = Sniffer(srv.port)
     try:
-        register(srv.address, "alice")
-        register(srv.address, "bob")
-        alice, bob = login(sniffer.address, "alice"), login(sniffer.address, "bob")
+        register(srv.url, "alice")
+        register(srv.url, "bob")
+        alice, bob = login(sniffer.url, "alice"), login(sniffer.url, "bob")
         befriend(alice, bob)
         payload = enc_dm("alice", "bob", SECRET)
         alice.send(type="send_dm", to="bob", payload=payload)
@@ -50,7 +50,7 @@ def test_wire_traffic_contains_no_plaintext(srv):
 
 
 def test_database_holds_only_ciphertext_and_password_hashes(srv):
-    alice, bob = make_user(srv.address, "alice"), make_user(srv.address, "bob")
+    alice, bob = make_user(srv.url, "alice"), make_user(srv.url, "bob")
     befriend(alice, bob)
     alice.send(type="group_create", name="G", members=["bob"])
     gid = alice.expect("group_update")["group"]["group_id"]
@@ -71,7 +71,7 @@ def test_database_holds_only_ciphertext_and_password_hashes(srv):
 
 
 def test_tampered_ciphertext_in_database_is_detected(srv, tmp_path):
-    alice, bob = make_user(srv.address, "alice"), make_user(srv.address, "bob")
+    alice, bob = make_user(srv.url, "alice"), make_user(srv.url, "bob")
     befriend(alice, bob)
     alice.send(type="send_dm", to="bob", payload=enc_dm("alice", "bob", SECRET))
     bob.expect("message")
@@ -90,7 +90,7 @@ def test_tampered_ciphertext_in_database_is_detected(srv, tmp_path):
 
 def test_ciphertext_replayed_by_another_user_fails_authentication(srv):
     """Mallory copies Alice's ciphertext and sends it to Bob as her own."""
-    alice, bob, mallory = (make_user(srv.address, n) for n in ("alice", "bob", "mallory"))
+    alice, bob, mallory = (make_user(srv.url, n) for n in ("alice", "bob", "mallory"))
     befriend(alice, bob)
     befriend(mallory, bob)
     alice.send(type="send_dm", to="bob", payload=enc_dm("alice", "bob", "transfer 1000 to alice"))
@@ -104,14 +104,14 @@ def test_ciphertext_replayed_by_another_user_fails_authentication(srv):
 
 
 def test_sender_cannot_be_spoofed(srv):
-    alice, bob, carol = (make_user(srv.address, n) for n in ("alice", "bob", "carol"))
+    alice, bob, carol = (make_user(srv.url, n) for n in ("alice", "bob", "carol"))
     befriend(alice, bob)
     alice.send(type="send_dm", to="bob", payload=enc_dm("alice", "bob", "hi"), **{"from": "carol"})
     assert bob.expect("message")["from"] == "alice"            # the server uses the session identity
 
 
 def test_non_friends_cannot_read_history_or_message(srv):
-    alice, bob, mallory = (make_user(srv.address, n) for n in ("alice", "bob", "mallory"))
+    alice, bob, mallory = (make_user(srv.url, n) for n in ("alice", "bob", "mallory"))
     befriend(alice, bob)
     alice.send(type="send_dm", to="bob", payload=enc_dm("alice", "bob", SECRET))
     bob.expect("message")
@@ -123,17 +123,17 @@ def test_non_friends_cannot_read_history_or_message(srv):
 
 def test_sql_injection_is_harmless(srv):
     evil = "alice'; DROP TABLE users;--"
-    res = register(srv.address, evil)
+    res = register(srv.url, evil)
     assert not res["ok"]                                          # fails validation
-    register(srv.address, "alice")
-    c = TClient(srv.address)
+    register(srv.url, "alice")
+    c = TClient(srv.url)
     for attempt in ("alice' OR '1'='1", "' OR 1=1 --", "alice'--"):
         c.send(type="login", username=attempt, password="' OR '1'='1")
         assert c.expect("login_result")["message"] == P.MSG_LOGIN_BAD
-    alice = login(srv.address, "alice")
+    alice = login(srv.url, "alice")
     alice.send(type="friend_request", to="' OR 1=1 --")
     assert alice.expect("error")["message"] == "User not found."
-    bob = make_user(srv.address, "bob")
+    bob = make_user(srv.url, "bob")
     befriend(alice, bob)
     nasty = "'); DROP TABLE messages; --"
     alice.send(type="send_dm", to="bob", payload=nasty)           # treated as data
@@ -143,14 +143,14 @@ def test_sql_injection_is_harmless(srv):
 
 
 def test_oversized_frame_closes_connection(srv):
-    c = make_user(srv.address, "alice")
+    c = make_user(srv.url, "alice")
     c.sock.sendall(P.HEADER.pack(P.MAX_FRAME + 1000) + b"x" * 500)
     assert "too large" in c.expect("error")["message"]
     assert closed_within(c)
 
 
 def test_non_text_frames_rejected(srv):
-    c = TClient(srv.address)
+    c = TClient(srv.url)
     c.send_raw(b"\x00\x01\x02\xff")
     assert "Malformed" in c.expect("error")["message"]
 
@@ -162,20 +162,20 @@ def test_half_open_garbage_does_not_crash_the_server(srv):
         s = socket.create_connection((host, port))
         s.sendall(junk)
         s.close()
-    c = make_user(srv.address, "alice")                      # still serving
+    c = make_user(srv.url, "alice")                      # still serving
     c.send(type="friend_request", to="nobody")
     assert c.expect("error")["message"] == "User not found."
 
 
 def test_passwords_are_never_echoed_or_logged(srv, caplog):
     caplog.set_level("DEBUG", logger="chat.server")
-    register(srv.address, "alice", password="S3cretPassw0rd!")
-    login(srv.address, "alice", password="S3cretPassw0rd!")
+    register(srv.url, "alice", password="S3cretPassw0rd!")
+    login(srv.url, "alice", password="S3cretPassw0rd!")
     assert "S3cretPassw0rd!" not in caplog.text
 
 
 def test_group_messages_cannot_be_posted_by_non_members(srv):
-    alice, bob, mallory = (make_user(srv.address, n) for n in ("alice", "bob", "mallory"))
+    alice, bob, mallory = (make_user(srv.url, n) for n in ("alice", "bob", "mallory"))
     befriend(alice, bob)
     alice.send(type="group_create", name="Private", members=["bob"])
     gid = alice.expect("group_update")["group"]["group_id"]
@@ -186,7 +186,7 @@ def test_group_messages_cannot_be_posted_by_non_members(srv):
 
 
 def test_group_message_is_unreadable_for_a_non_member_with_database_access(srv):
-    alice, bob, carol = (make_user(srv.address, n) for n in ("alice", "bob", "carol"))
+    alice, bob, carol = (make_user(srv.url, n) for n in ("alice", "bob", "carol"))
     befriend(alice, bob)
     alice.send(type="group_create", name="Closed", members=["bob"])
     gid = alice.expect("group_update")["group"]["group_id"]
@@ -200,7 +200,7 @@ def test_group_message_is_unreadable_for_a_non_member_with_database_access(srv):
 
 def test_server_cannot_decrypt_with_what_it_stores(srv):
     """The server only holds public keys; a guessed passphrase does not produce the right key pair."""
-    alice, bob = make_user(srv.address, "alice"), make_user(srv.address, "bob")
+    alice, bob = make_user(srv.url, "alice"), make_user(srv.url, "bob")
     befriend(alice, bob)
     alice.send(type="send_dm", to="bob", payload=enc_dm("alice", "bob", SECRET))
     bob.expect("message")
