@@ -18,7 +18,8 @@
 | `server/app.py` | TCP listener, thread per client, sessions, login/register, presence, friends, groups, routing, offline queue |
 | `client/network.py` | plain TCP socket on a background thread, keep-alive pings, event queue, reconnect with back-off |
 | `client/controller.py` | all client logic: encryption, decryption, unread counts, history merge |
-| `client/gui.py` | login window, chat window, group dialogs |
+| `client/gui.py` | login/registration (with the passphrase window), chat window, Add-friend (find people) and group dialogs |
+| `run_server.py` | starts the server; `--show-db` prints the stored password hashes and ciphertext |
 
 ## Database schema
 
@@ -49,6 +50,7 @@ Client → server
 | `register` | username, password, confirm, fullname, public_key |
 | `login` / `logout` | username, password, public_key / – |
 | `ping` | – (answered with `pong`; sent every 15 s) |
+| `user_search` | query (empty = list everybody) |
 | `friend_request` | to |
 | `friend_respond` | from, accept |
 | `friend_remove` | user |
@@ -66,6 +68,7 @@ Server → client
 | `register_result`, `login_result`, `pong` | `ok` + message |
 | `state` | friends (with online flag), requests, groups, everyone online |
 | `presence` | a user came online / went offline |
+| `user_list` | users (username, fullname, online, relationship), more |
 | `friend_request_in`, `request_sent`, `request_cleared`, `friend_added`, `friend_removed` | friend changes |
 | `message`, `group_message` | ciphertext + sender + id + timestamp (`queued` = delivered from the offline queue) |
 | `history` | ordered ciphertexts for one conversation |
@@ -106,7 +109,5 @@ Server → client
 | Report | Implementation | Why |
 |---|---|---|
 | Shared chat passphrase (report limitation) | Personal auto-generated passphrase + X25519 key agreement | each user gets their own secret; the server holds only public keys |
-| One-to-one chat | plus friends, online list, groups, offline delivery | requested extensions |
+| One-to-one chat | plus friends (searchable "Find people" list), online list, groups, offline delivery, persistent history | requested extensions |
 | PyCryptodome for AES (Table in 3.10) | `cryptography` library (AES-256-GCM, X25519, HKDF) | one library covers AES-GCM and the X25519 key agreement; update the 3.10 table in the report |
-| "Shared secret" style key handling | per-user passphrase, public keys stored on the server | see above |
-

@@ -15,7 +15,6 @@ How it works
 """
 import base64
 import binascii
-import hashlib
 import json
 import os
 import re
@@ -27,7 +26,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from shared import protocol as P
 from shared.crypto_utils import (KEY_SIZE, PBKDF2_ITERATIONS, DecryptionError, decrypt_message,
-                                 encrypt_message)
+                                 derive_key, encrypt_message)
 
 APP_SALT = b"Hussaini-SecureChat-v4"
 # 32 symbols = exactly 5 bits each; no 0/O/1/I so the passphrase is easy to copy by eye.
@@ -63,8 +62,7 @@ class Identity:
         pw = normalize_passphrase(passphrase)
         if not pw:
             raise ValueError("Passphrase must not be empty.")
-        salt = APP_SALT + b"|identity|" + username.encode("utf-8")
-        seed = hashlib.pbkdf2_hmac("sha256", pw.encode("utf-8"), salt, iterations, dklen=32)
+        seed = derive_key(pw, APP_SALT + b"|identity|" + username.encode("utf-8"), iterations)
         self.username = username
         self._private = X25519PrivateKey.from_private_bytes(seed)
         raw_public = self._private.public_key().public_bytes(

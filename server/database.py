@@ -121,28 +121,20 @@ class Database:
                 conn.rollback()
                 raise
 
-    @staticmethod
-    def _q(conn, sql, params=()):
-        return conn.execute(sql, params)
-
     def _all(self, conn, sql, params=()):
-        return [dict(r) for r in self._q(conn, sql, params).fetchall()]
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
     def _one(self, conn, sql, params=()):
-        row = self._q(conn, sql, params).fetchone()
+        row = conn.execute(sql, params).fetchone()
         return dict(row) if row else None
-
-    @staticmethod
-    def _insert(conn, sql, params, _id_col=None):
-        return conn.execute(sql, params).lastrowid
 
     def init_schema(self):
         with self._tx() as conn:
             for stmt in SCHEMA:
-                self._q(conn, stmt)
-            columns = [r["name"] for r in self._q(conn, "PRAGMA table_info(users)").fetchall()]
+                conn.execute(stmt)
+            columns = [r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
             if "public_key" not in columns:              # database made by an older version
-                self._q(conn, "ALTER TABLE users ADD COLUMN public_key TEXT NOT NULL DEFAULT ''")
+                conn.execute("ALTER TABLE users ADD COLUMN public_key TEXT NOT NULL DEFAULT ''")
 
     # ------------------------------------------------------------------ #
     # users
@@ -152,11 +144,10 @@ class Database:
             if self._one(conn, "SELECT user_id FROM users WHERE username = ?", (username,)):
                 raise UserExistsError(username)
             try:
-                uid = self._insert(
-                    conn,
+                uid = conn.execute(
                     "INSERT INTO users (username, password, fullname, public_key, date_created) "
                     "VALUES (?, ?, ?, ?, ?)",
-                    (username, pw_hash, fullname, public_key, utcnow()), "user_id")
+                    (username, pw_hash, fullname, public_key, utcnow())).lastrowid
             except Exception as exc:                     # race: duplicate inserted meanwhile
                 if "unique" in str(exc).lower() or "duplicate" in str(exc).lower():
                     raise UserExistsError(username) from exc
@@ -179,8 +170,8 @@ class Database:
 
     def add_friend_request(self, from_user, to_user):
         with self._tx() as conn:
-            self._q(conn, "INSERT INTO friend_requests (from_user, to_user, created) VALUES (?, ?, ?) "
-                          "ON CONFLICT (from_user, to_user) DO NOTHING",
+            conn.execute("INSERT INTO friend_requests (from_user, to_user, created) VALUES (?, ?, ?) "
+                         "ON CONFLICT (from_user, to_user) DO NOTHING",
                     (from_user, to_user, utcnow()))
 
     def has_request(self, from_user, to_user):
@@ -190,7 +181,7 @@ class Database:
 
     def delete_request(self, from_user, to_user):
         with self._tx() as conn:
-            self._q(conn, "DELETE FROM friend_requests WHERE from_user = ? AND to_user = ?",
+            conn.execute("DELETE FROM friend_requests WHERE from_user = ? AND to_user = ?",
                     (from_user, to_user))
 
     def incoming_requests(self, user):
@@ -209,10 +200,10 @@ class Database:
     def make_friends(self, a, b):
         x, y = self._pair(a, b)
         with self._tx() as conn:
-            self._q(conn, "DELETE FROM friend_requests WHERE (from_user = ? AND to_user = ?) "
-                          "OR (from_user = ? AND to_user = ?)", (a, b, b, a))
-            self._q(conn, "INSERT INTO friendships (user_a, user_b, created) VALUES (?, ?, ?) "
-                          "ON CONFLICT (user_a, user_b) DO NOTHING", (x, y, utcnow()))
+            conn.execute("DELETE FROM friend_requests WHERE (from_user = ? AND to_user = ?) "
+                         "OR (from_user = ? AND to_user = ?)", (a, b, b, a))
+            conn.execute("INSERT INTO friendships (user_a, user_b, created) VALUES (?, ?, ?) "
+                         "ON CONFLICT (user_a, user_b) DO NOTHING", (x, y, utcnow()))
 
     def are_friends(self, a, b):
         x, y = self._pair(a, b)
@@ -223,7 +214,21 @@ class Database:
     def remove_friendship(self, a, b):
         x, y = self._pair(a, b)
         with self._tx() as conn:
-            self._q(conn, "DELETE FROM friendships WHERE user_a = ? AND user_b = ?", (x, y))
+            conn.execute("DELETE FROM friendships WHERE user_a = ? AND user_b = ?", (x, y))
+
+    def search_users(self, exclude, query="", limit=100):
+        """Users other than `exclude` whose username or full name contains `query` (case-insensitive).
+
+        An empty query lists everybody. LIKE wildcards typed by the user are escaped, so a search
+        for "50%" or "a_b" only matches those literal characters.
+        """
+        like = "%" + query.strip().lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        with self._tx() as conn:
+            return self._all(
+                conn,
+                "SELECT username, fullname FROM users WHERE username != ? "
+                "AND (LOWER(username) LIKE ? ESCAPE '\\' OR LOWER(fullname) LIKE ? ESCAPE '\\') "
+                "ORDER BY LOWER(fullname), username LIMIT ?", (exclude, like, like, int(limit)))
 
     def friends_of(self, user):
         with self._tx() as conn:
@@ -239,10 +244,9 @@ class Database:
     def save_message(self, sender, receiver, encrypted):
         ts = utcnow()
         with self._tx() as conn:
-            mid = self._insert(
-                conn,
+            mid = conn.execute(
                 "INSERT INTO messages (sender, receiver, encrypted_message, timestamp, delivered) "
-                "VALUES (?, ?, ?, ?, 0)", (sender, receiver, encrypted, ts), "message_id")
+                "VALUES (?, ?, ?, ?, 0)", (sender, receiver, encrypted, ts)).lastrowid
         return mid, ts
 
     @staticmethod
@@ -261,7 +265,7 @@ class Database:
             return
         with self._tx() as conn:
             for mid in ids:
-                self._q(conn, "UPDATE messages SET delivered = 1 WHERE message_id = ?", (mid,))
+                conn.execute("UPDATE messages SET delivered = 1 WHERE message_id = ?", (mid,))
 
     def direct_history(self, a, b, limit=100):
         with self._tx() as conn:
@@ -281,13 +285,13 @@ class Database:
     def create_group(self, name, admin, members):
         """members: usernames to add besides the admin. Returns the group id."""
         with self._tx() as conn:
-            gid = self._insert(conn, "INSERT INTO chat_groups (name, admin, created) VALUES (?, ?, ?)",
-                               (name, admin, utcnow()), "group_id")
+            gid = conn.execute("INSERT INTO chat_groups (name, admin, created) VALUES (?, ?, ?)",
+                               (name, admin, utcnow())).lastrowid
             m = self._max_group_msg(conn)
             for user in [admin] + [u for u in members if u != admin]:
-                self._q(conn, "INSERT INTO group_members (group_id, username, first_visible_id, "
-                              "last_delivered_id, joined) VALUES (?, ?, ?, ?, ?) "
-                              "ON CONFLICT (group_id, username) DO NOTHING",
+                conn.execute("INSERT INTO group_members (group_id, username, first_visible_id, "
+                             "last_delivered_id, joined) VALUES (?, ?, ?, ?, ?) "
+                             "ON CONFLICT (group_id, username) DO NOTHING",
                         (gid, user, m, m, utcnow()))
         return gid
 
@@ -309,11 +313,6 @@ class Database:
                 conn, "SELECT group_id FROM group_members WHERE username = ? ORDER BY group_id", (user,))]
         return [self.get_group(i) for i in ids]
 
-    def group_member_names(self, group_id):
-        with self._tx() as conn:
-            rows = self._all(conn, "SELECT username FROM group_members WHERE group_id = ?", (group_id,))
-        return [r["username"] for r in rows]
-
     def is_member(self, group_id, user):
         with self._tx() as conn:
             return self._one(conn, "SELECT username FROM group_members WHERE group_id = ? AND username = ?",
@@ -322,32 +321,31 @@ class Database:
     def add_group_member(self, group_id, user):
         with self._tx() as conn:
             m = self._max_group_msg(conn)
-            self._q(conn, "INSERT INTO group_members (group_id, username, first_visible_id, "
-                          "last_delivered_id, joined) VALUES (?, ?, ?, ?, ?) "
-                          "ON CONFLICT (group_id, username) DO NOTHING",
+            conn.execute("INSERT INTO group_members (group_id, username, first_visible_id, "
+                         "last_delivered_id, joined) VALUES (?, ?, ?, ?, ?) "
+                         "ON CONFLICT (group_id, username) DO NOTHING",
                     (group_id, user, m, m, utcnow()))
 
     def remove_group_member(self, group_id, user):
         with self._tx() as conn:
-            self._q(conn, "DELETE FROM group_members WHERE group_id = ? AND username = ?", (group_id, user))
+            conn.execute("DELETE FROM group_members WHERE group_id = ? AND username = ?", (group_id, user))
 
     def set_group_admin(self, group_id, user):
         with self._tx() as conn:
-            self._q(conn, "UPDATE chat_groups SET admin = ? WHERE group_id = ?", (user, group_id))
+            conn.execute("UPDATE chat_groups SET admin = ? WHERE group_id = ?", (user, group_id))
 
     def delete_group(self, group_id):
         with self._tx() as conn:
-            self._q(conn, "DELETE FROM group_messages WHERE group_id = ?", (group_id,))
-            self._q(conn, "DELETE FROM group_members WHERE group_id = ?", (group_id,))
-            self._q(conn, "DELETE FROM chat_groups WHERE group_id = ?", (group_id,))
+            conn.execute("DELETE FROM group_messages WHERE group_id = ?", (group_id,))
+            conn.execute("DELETE FROM group_members WHERE group_id = ?", (group_id,))
+            conn.execute("DELETE FROM chat_groups WHERE group_id = ?", (group_id,))
 
     def save_group_message(self, group_id, sender, encrypted):
         ts = utcnow()
         with self._tx() as conn:
-            mid = self._insert(
-                conn,
+            mid = conn.execute(
                 "INSERT INTO group_messages (group_id, sender, encrypted_message, timestamp) "
-                "VALUES (?, ?, ?, ?)", (group_id, sender, encrypted, ts), "message_id")
+                "VALUES (?, ?, ?, ?)", (group_id, sender, encrypted, ts)).lastrowid
         return mid, ts
 
     def group_backlog(self, group_id, user):
@@ -363,8 +361,8 @@ class Database:
 
     def set_group_cursor(self, group_id, user, message_id):
         with self._tx() as conn:
-            self._q(conn, "UPDATE group_members SET last_delivered_id = ? "
-                          "WHERE group_id = ? AND username = ? AND last_delivered_id < ?",
+            conn.execute("UPDATE group_members SET last_delivered_id = ? "
+                         "WHERE group_id = ? AND username = ? AND last_delivered_id < ?",
                     (message_id, group_id, user, message_id))
 
     def group_history(self, group_id, user, limit=100):

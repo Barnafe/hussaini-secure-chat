@@ -8,7 +8,6 @@ import time
 
 from server.app import ChatServer, start_server
 from shared import protocol as P
-from shared.crypto_utils import encrypt_message
 from shared.keys import Identity, generate_passphrase, seal_dm, seal_group
 
 KDF_ITERATIONS = 1000          # few iterations so tests are fast - the algorithm is identical
@@ -33,8 +32,6 @@ class ServerThread:
     @property
     def address(self):
         return f"127.0.0.1:{self.port}"
-
-    url = address                                  # older name used by the tests
 
     def start(self):
         self.tcp = start_server(self.chat, "127.0.0.1", 0)
@@ -184,10 +181,6 @@ def enc_group(sender, gid, text, members):
     return seal_group(IDENTITIES[sender], gid, text, keys)
 
 
-def enc_raw(key, text, aad=""):
-    return encrypt_message(key, text, aad)
-
-
 class Sniffer:
     """A transparent TCP relay that records all bytes seen on the wire."""
 
@@ -204,8 +197,6 @@ class Sniffer:
     @property
     def address(self):
         return f"127.0.0.1:{self.port}"
-
-    url = address
 
     def _accept(self):
         while not self._stop:

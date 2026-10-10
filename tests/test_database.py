@@ -135,3 +135,18 @@ def test_database_is_safe_across_threads(db):
     for t in threads:
         t.join()
     assert not errors and len(db.undelivered_messages("bob")) == 200
+
+
+def test_search_users_lists_everyone_but_me_and_filters(db):
+    for username, fullname in [("alice", "Alice Adamu"), ("bob", "Bob Bello"), ("carol", "Carol 50% Off"),
+                               ("dan_x", "Dan X"), ("danny", "Danny Z")]:
+        db.create_user(username, "hash", fullname, "PUBKEY")
+    names = lambda rows: [r["username"] for r in rows]          # noqa: E731
+    assert names(db.search_users("alice")) == ["bob", "carol", "dan_x", "danny"]       # everyone but me
+    assert names(db.search_users("alice", "BELL")) == ["bob"]                           # case-insensitive, full name
+    assert names(db.search_users("alice", "danny")) == ["danny"]                        # username
+    assert names(db.search_users("alice", "nobody")) == []
+    assert names(db.search_users("alice", "50%")) == ["carol"]                          # % is literal, not a wildcard
+    assert names(db.search_users("alice", "dan_")) == ["dan_x"]                         # _ is literal too
+    assert names(db.search_users("alice", "' OR 1=1 --")) == []                         # no SQL injection
+    assert len(db.search_users("alice", "", limit=2)) == 2

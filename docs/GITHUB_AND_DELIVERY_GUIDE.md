@@ -11,7 +11,7 @@ for the GitHub route - GitHub builds the Windows `.exe` files for you.
 ## B. Put the project on GitHub
 1. On GitHub click **+ → New repository**. Name: `hussaini-secure-chat`. Choose **Private**.
    Do **not** tick "Add a README". Click **Create repository**.
-2. Unzip `Hussaini_v5.zip`. Open the **`Hussaini`** folder, click the address bar, type `powershell`, press Enter.
+2. Unzip `Hussaini_v7.zip`. Open the **`Hussaini`** folder, click the address bar, type `powershell`, press Enter.
 3. Run these commands one by one (replace `YOUR-USERNAME`):
 
 ```powershell
@@ -48,7 +48,7 @@ git push -u origin main
 
 ## E. Give it to your friend
 * Send him the **zip** (not loose files) with Google Drive / OneDrive. Do not email `.exe` files - Gmail blocks them.
-* Also send the **source** (the `Hussaini_v5.zip` you started from, or the GitHub link) so his supervisor can
+* Also send the **source** (the `Hussaini_v7.zip` you started from, or the GitHub link) so his supervisor can
   inspect the code.
 * He extracts the zip into a folder and double-clicks `start-demo.bat`. He reads `PRESENTATION_GUIDE.txt`
   (inside the zip) before the presentation.

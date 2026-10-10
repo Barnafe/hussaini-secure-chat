@@ -11,7 +11,7 @@ a = Analysis(
     binaries=[],
     datas=[],
     hiddenimports=['bcrypt', 'cryptography', 'tkinter', 'tkinter.ttk', 'tkinter.filedialog',
-                   'tkinter.messagebox', 'tkinter.simpledialog'],
+                   'tkinter.messagebox'],
     hookspath=[],
     runtime_hooks=[],
     excludes=['pytest', 'yaml', 'sqlite3', 'server'],

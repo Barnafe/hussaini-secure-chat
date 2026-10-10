@@ -31,8 +31,10 @@ QUICK START (ONE COMPUTER)
    tick "I have saved my passphrase" and continue.
 5. Window 2: register a second user the same way.
 6. Sign in on both (the passphrase is already filled in right after registering).
-7. In window 1 open the ONLINE tab, pick the other user, click "Send friend
-   request". In window 2 open FRIENDS, pick the request, click Accept.
+7. In window 1 open the FRIENDS tab and click "Add friend...". Everyone who
+   has an account is listed; pick the other user (the search bar narrows the
+   list) and click "Send friend request". In window 2 open FRIENDS, pick the
+   request, click Accept.
 8. Click the friend's name and start chatting. Try Groups > New group too.
 
 
@@ -55,6 +57,13 @@ USING TWO OR MORE COMPUTERS
    the Server box (host:port).
 4. The first time, Windows Firewall may ask about the server. Click
    "Allow access" (private networks).
+
+
+SEE WHAT THE SERVER STORES
+--------------------------
+Double-click show-database.bat. It lists the accounts (password HASHES, never
+the real passwords) and the messages (unreadable ciphertext). Useful as proof
+that the server cannot read your chats.
 
 
 SETTINGS

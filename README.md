@@ -11,11 +11,11 @@ report (`ATBU_CHAPTERS_TEACHER.docx`).
 |---|---|
 | Accounts | Register (full name, username, password, confirm) and login. Passwords are hashed with **bcrypt**. Failed-login lockout after 5 tries. One active session per account. |
 | **Personal passphrase** | Created **automatically at registration** and shown once (copy / save to file). It is needed at every login and never leaves the computer. |
-| Friends | Friend request by username, accept / decline, remove. A list of **everyone online** helps you find people. |
+| Friends | **Add friend...** opens a "Find people" list showing every user straight away (online/offline marker, relationship status) with a **search bar** to filter by name or username. Send a request, the other person accepts or declines; remove friends any time. |
+| History | Log out and log in again: your chats are still there (kept on the server as ciphertext, decrypted on your computer with your passphrase). Each chat reloads its latest 200 messages. |
 | Private chat | One-to-one chat between friends, real-time. |
 | Offline delivery | Messages to an offline friend are stored (encrypted) and delivered at their next login. |
 | Group chat | Groups made from your friends. Creator is admin (add / remove); anyone can leave. New members only see messages sent after they joined. |
-| History | Loaded from the database and decrypted on your machine. |
 | Encryption | AES-256-GCM (confidentiality **and** tamper detection). Keys come from X25519 key agreement between the two users' passphrase-derived key pairs. |
 | Reliability | Keep-alive pings, auto-reconnect + automatic re-login, flood control, idle clean-up. |
 | Database | **SQLite** only (`data/chat.db`). |
@@ -44,10 +44,14 @@ Hussaini/
 │   ├── controller.py        all client logic (keys, encrypt/decrypt, state) - no GUI code
 │   ├── gui.py               Tkinter windows
 │   └── main.py              entry point (+ --selftest)
-├── packaging/               PyInstaller specs, release assembler, build smoke test, Windows files
+├── packaging/               PyInstaller specs, release assembler, build smoke test,
+│   └── windows/             start-demo.bat, show-database.bat, README.txt, PRESENTATION_GUIDE.txt
 ├── .github/workflows/build-windows.yml   builds + tests + packages the Windows zip
 ├── tests/                   pytest suite (section 5)
-└── docs/ARCHITECTURE.md     design notes, protocol table, DB schema
+└── docs/
+    ├── ARCHITECTURE.md                design notes, protocol table, DB schema
+    ├── GITHUB_AND_DELIVERY_GUIDE.md   push to GitHub, build, test and hand over, step by step
+    └── REPORT_NOTES.md                where the finished system differs from Chapters 1-3, limitations
 ```
 
 ## 2. Run it from source (VS Code)
@@ -66,10 +70,14 @@ python run_client.py              # terminal 2 (and a third terminal for a secon
 Or double-click `start-demo-from-source.bat` on Windows.
 
 In each client: **Server** `localhost:8765` → *Register* → copy/save the passphrase shown → *Login*
-(username, password, passphrase) → *Online* tab → send a friend request → the other user accepts in *Friends*.
+(username, password, passphrase) → *Friends* tab → **Add friend...** → pick someone from the list → *Send friend request*
+→ the other user accepts in *Friends*.
 
 Change the port or database location in `settings.txt` (or with `HUSSAINI_SERVER_PORT`, `HUSSAINI_DATABASE_FILE`, …).
 A different computer connects with `<server-ip>:8765` (the server prints its address when it starts).
+
+To see what the server really stores (bcrypt hashes and unreadable ciphertext), run
+`python run_server.py --show-db` (in the Windows package: double-click `show-database.bat`).
 
 ## 3. Build the Windows .exe files
 
@@ -115,13 +123,13 @@ pytest tests/test_security.py -v        # one phase
 | `test_keys.py` | passphrase format, key agreement, DM + group envelopes, outsiders cannot read |
 | `test_protocol.py` | framing over real sockets (split/partial/oversized frames), `host:port` parsing |
 | `test_settings.py` | settings.txt loading, validation messages, environment overrides |
-| `test_database.py` | users, public keys, friends, offline queue, groups, thread safety, upgrade of old DBs |
-| `test_server.py` | registration/login rules, passphrase check, presence, friends, DM, offline delivery, groups |
-| `test_client.py` | real clients end to end: auto-generated passphrase, encryption, offline, reconnect |
-| `test_gui_smoke.py` | drives the real Tkinter window incl. the passphrase window (skipped without a display) |
+| `test_database.py` | users, public keys, friends, user search, offline queue, groups, thread safety, upgrade of old DBs |
+| `test_server.py` | registration/login rules, passphrase check, presence, friends, find-people search, DM, offline delivery, groups |
+| `test_client.py` | real clients end to end: auto-generated passphrase, find people, encryption, offline, reconnect |
+| `test_gui_smoke.py` | drives the real Tkinter window incl. the passphrase and Add-friend windows (skipped without a display) |
 | `test_security.py` | wire sniffing shows only ciphertext, DB holds only ciphertext/hashes/public keys, forgery, SQL injection, garbage frames |
 | `test_performance.py` | latency, 20 concurrent clients, crypto cost → writes `tests/results/performance.md` |
-| `test_entrypoints.py` | `run_server.py` really starts/stops, packaging files and workflow are consistent, release assembly |
+| `test_entrypoints.py` | `run_server.py` really starts/stops and `--show-db` works, packaging files and workflow are consistent, release assembly |
 
 On a headless Linux box run the GUI test with `xvfb-run pytest tests/test_gui_smoke.py`.
 

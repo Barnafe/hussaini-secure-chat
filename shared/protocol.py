@@ -11,20 +11,19 @@ and the JSON object always has a "type" field:
 Client -> server types
     register, login, logout, ping,
     friend_request, friend_respond, friend_remove,
-    send_dm, send_group, history,
+    send_dm, send_group, history, user_search,
     group_create, group_add, group_remove, group_leave
 
 Server -> client types
     register_result, login_result, pong, state, presence,
     friend_request_in, request_sent, request_cleared, friend_added, friend_removed,
-    message, group_message, history,
+    message, group_message, history, user_list,
     group_update, group_removed,
     notice, error, kicked, logged_out
 """
 import json
 import re
 import select
-import socket
 import struct
 import time
 
@@ -40,6 +39,7 @@ MAX_GROUP_MEMBERS = 50
 MAX_PAYLOAD = 32_768             # max length of an encrypted message (text characters)
 MAX_FRAME = 131_072              # max size of one frame body (bytes)
 HISTORY_LIMIT = 200
+USER_SEARCH_LIMIT = 100           # people returned by one "find people" search
 PUBLIC_KEY_BYTES = 32            # X25519 public key
 
 HEADER = struct.Struct(">I")

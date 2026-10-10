@@ -339,3 +339,24 @@ def test_client_keeps_the_connection_alive_with_pings(srv):
         assert srv.chat.sessions["alice"].conn is before and a.ctrl.connected
     finally:
         net.PING_EVERY = old
+
+
+def test_find_people_flow_in_the_controller(srv):
+    """The data behind the Add friend window: everyone listed, search narrows, statuses stay live."""
+    a, b, c = Peer(srv), Peer(srv), Peer(srv)
+    for peer, name in ((a, "alice"), (b, "bob"), (c, "carol")):
+        assert peer.register(name, name.title() + " Test")["ok"]
+        peer.login(name)
+    a.ctrl.search_users("")
+    a.wait(lambda: a.ctrl.user_query == "" and len(a.ctrl.user_results) == 2, what="everyone listed")
+    assert {u["username"] for u in a.ctrl.user_results} == {"bob", "carol"}
+    assert a.ctrl.relationship("bob") == "none" and a.ctrl.is_online("bob")
+    a.ctrl.search_users("car")
+    a.wait(lambda: a.ctrl.user_query == "car", what="filtered list")
+    assert [u["username"] for u in a.ctrl.user_results] == ["carol"]
+    a.ctrl.send_friend_request("carol")
+    a.wait(lambda: a.ctrl.relationship("carol") == "request_sent", what="request sent")
+    c.wait(lambda: c.ctrl.relationship("alice") == "request_received", what="carol sees the request")
+    c.ctrl.respond_request("alice", True)
+    a.wait(lambda: a.ctrl.relationship("carol") == "friend", what="now friends")
+    assert a.ctrl.relationship("bob") == "none"

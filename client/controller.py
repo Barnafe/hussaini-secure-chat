@@ -60,6 +60,9 @@ class ChatController:
         self.loaded = set()          # conv keys whose history was fetched
         self.unread = {}             # conv key -> count
         self.current = None
+        self.user_results = []       # last "find people" answer: [{"username", "fullname", ...}]
+        self.user_more = False       # True if there were more matches than were sent
+        self.user_query = None
         self._pending_auth = None
         self._pending_identity = None    # key pair of the login attempt in flight
         self._pending_register = None    # {"username", "passphrase"} of the registration in flight
@@ -388,6 +391,29 @@ class ChatController:
             self._notify("error", "Message is too long for this group.")
             return False
         return self.network.send({"type": "send_group", "group_id": gid, "payload": payload})
+
+    def search_users(self, query=""):
+        """Ask the server for people to add. An empty query lists everybody."""
+        self.network.send({"type": "user_search", "query": (query or "").strip()})
+
+    def relationship(self, username):
+        """friend / request_received / request_sent / none - always up to date with live events."""
+        if username in self.friends:
+            return "friend"
+        if any(r["username"] == username for r in self.requests_in):
+            return "request_received"
+        if username in self.requests_out:
+            return "request_sent"
+        return "none"
+
+    def is_online(self, username):
+        return username in self.online_users
+
+    def _on_user_list(self, ev):
+        self.user_results = list(ev.get("users", []))
+        self.user_more = bool(ev.get("more"))
+        self.user_query = ev.get("query", "")
+        self._notify("user_list")
 
     def send_friend_request(self, username):
         self.network.send({"type": "friend_request", "to": username})

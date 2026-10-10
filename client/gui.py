@@ -233,6 +233,95 @@ class PassphraseDialog(_Dialog):
             messagebox.showerror("Could not save", str(exc), parent=self)
 
 
+class AddFriendDialog(_Dialog):
+    """"Find people": everybody on the server is listed straight away, with a search bar to narrow it down."""
+
+    STATUS_TEXT = {"friend": "Friends", "request_sent": "Request sent",
+                   "request_received": "Wants to add you - accept in the Friends tab", "none": ""}
+
+    def __init__(self, parent, ctrl):
+        super().__init__(parent, "Add friend", 460, 580)
+        self.ctrl = ctrl
+        self.rows = []                       # usernames, in the order shown
+        self._timer = None
+        ttk.Label(self, text="Find people", font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=14, pady=(14, 0))
+        ttk.Label(self, text="Everyone who has an account is listed (\u25cf online, \u25cb offline). Type to search by name or username.",
+                  foreground=MUTED, wraplength=430, justify="left").pack(anchor="w", padx=14, pady=(2, 8))
+        self.query = tk.StringVar()
+        self.entry = ttk.Entry(self, textvariable=self.query)
+        self.entry.pack(fill="x", padx=14)
+        self.entry.bind("<KeyRelease>", self._typed)
+        self.entry.bind("<Return>", lambda e: self.send())
+        self.count = ttk.Label(self, text="Loading...", foreground=MUTED)
+        self.count.pack(anchor="w", padx=14, pady=(6, 2))
+        box = ttk.Frame(self)
+        box.pack(fill="both", expand=True, padx=14)
+        self.lb = tk.Listbox(box, exportselection=False, bg=FIELD, fg=TEXT, selectbackground=ACCENT_DARK,
+                             selectforeground="white", relief="flat", highlightthickness=1,
+                             highlightbackground=PANEL_ALT, font=("Segoe UI", 10), activestyle="none")
+        sb = ttk.Scrollbar(box, command=self.lb.yview)
+        self.lb.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.lb.pack(side="left", fill="both", expand=True)
+        self.lb.bind("<<ListboxSelect>>", lambda e: self._update_button())
+        self.lb.bind("<Double-Button-1>", lambda e: self.send())
+        self.msg = ttk.Label(self, text="", foreground=MUTED)
+        self.msg.pack(anchor="w", padx=14, pady=(4, 0))
+        self.btn = ttk.Button(self, text="Send friend request", command=self.send, state="disabled")
+        self.btn.pack(fill="x", padx=14, pady=12)
+        self.entry.focus_set()
+        self.ctrl.search_users("")
+
+    # ---- searching ---------------------------------------------------- #
+    def _typed(self, _event=None):
+        if self._timer is not None:
+            self.after_cancel(self._timer)
+        self._timer = self.after(300, self._search)          # wait until the typing pauses
+
+    def _search(self):
+        self._timer = None
+        self.ctrl.search_users(self.query.get())
+
+    # ---- showing results ---------------------------------------------- #
+    def refresh(self):
+        """Redraw from the controller (also called when friend/online information changes)."""
+        keep = self.rows[self.lb.curselection()[0]] if self.lb.curselection() and self.rows else None
+        users = self.ctrl.user_results
+        self.rows = [u["username"] for u in users]
+        self.lb.delete(0, tk.END)
+        for u in users:
+            dot = "\u25cf" if self.ctrl.is_online(u["username"]) else "\u25cb"
+            note = self.STATUS_TEXT[self.ctrl.relationship(u["username"])]
+            self.lb.insert(tk.END, f" {dot}  {u['fullname']}  (@{u['username']})" + (f"     {note}" if note else ""))
+        if keep in self.rows:
+            self.lb.selection_set(self.rows.index(keep))
+        q = (self.ctrl.user_query or "").strip()
+        if not users:
+            self.count.configure(text=f'No one matches "{q}".' if q else "No other users have registered yet.")
+        elif self.ctrl.user_more:
+            self.count.configure(text=f"Showing the first {len(users)} people - type to narrow the list.")
+        else:
+            self.count.configure(text=f"{len(users)} {'person' if len(users) == 1 else 'people'}"
+                                      + (f' matching "{q}"' if q else ""))
+        self._update_button()
+
+    def _selected(self):
+        sel = self.lb.curselection()
+        return self.rows[sel[0]] if sel and self.rows else None
+
+    def _update_button(self):
+        user = self._selected()
+        rel = self.ctrl.relationship(user) if user else None
+        self.btn.configure(state="normal" if rel == "none" else "disabled")
+        self.msg.configure(text="" if rel in (None, "none") else self.STATUS_TEXT[rel], foreground=MUTED)
+
+    def send(self):
+        user = self._selected()
+        if user and self.ctrl.relationship(user) == "none":
+            self.ctrl.send_friend_request(user)
+            self.msg.configure(text=f"Sending a request to @{user}...", foreground=OK_COLOR)
+
+
 class CreateGroupDialog(_Dialog):
     def __init__(self, parent, ctrl):
         super().__init__(parent, "New group", 360, 440)
@@ -555,10 +644,7 @@ class MainFrame(ttk.Frame):
             self.entry.delete(0, tk.END)
 
     def add_friend(self):
-        from tkinter import simpledialog
-        name = simpledialog.askstring("Add friend", "Username of the person to add:", parent=self)
-        if name:
-            self.ctrl.send_friend_request(name)
+        self.app.find_dialog = AddFriendDialog(self, self.ctrl)
 
     def remove_friend(self):
         sel = self.friend_lb.curselection()
@@ -616,6 +702,7 @@ class App(tk.Tk):
         self.ctrl = controller or ChatController()
         self.ctrl.on_update = self.on_update
         self.manage_dialog = None
+        self.find_dialog = None
         self.login = None
         self.main = None
         self.show_login()
@@ -709,6 +796,16 @@ class App(tk.Tk):
 
     # ---- controller callbacks ---------------------------------------- #
     def on_update(self, topic, payload=None):
+        self._handle_update(topic, payload)
+        dlg = self.find_dialog
+        if topic in ("user_list", "state", "requests", "presence") and dlg is not None:
+            try:
+                if dlg.winfo_exists():
+                    dlg.refresh()
+            except tk.TclError:
+                self.find_dialog = None
+
+    def _handle_update(self, topic, payload=None):
         login, main = self.login, self.main
         if topic == "status" and login:
             login.set_status(payload, ok=True)

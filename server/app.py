@@ -16,6 +16,7 @@ thread running ``ChatServer.handle_connection``. Frames are length-prefixed JSON
 (see shared/protocol.py).
 """
 import logging
+import os
 import socket
 import threading
 import time
@@ -108,6 +109,7 @@ class ChatServer:
             "send_dm": self.on_send_dm,
             "send_group": self.on_send_group,
             "history": self.on_history,
+            "user_search": self.on_user_search,
             "group_create": self.on_group_create,
             "group_add": self.on_group_add,
             "group_remove": self.on_group_remove,
@@ -382,6 +384,25 @@ class ChatServer:
         self._send_to(target, {"type": "friend_request_in", "username": me,
                                "fullname": session.fullname})
 
+    def on_user_search(self, session, msg):
+        """"Find people": everybody except me (optionally filtered), with their relationship to me."""
+        me, conn = session.username, session.conn
+        query = msg.get("query")
+        query = query.strip()[:40] if isinstance(query, str) else ""
+        rows = self.db.search_users(me, query, P.USER_SEARCH_LIMIT + 1)
+        more = len(rows) > P.USER_SEARCH_LIMIT
+        friends = {f["username"] for f in self.db.friends_of(me)}
+        incoming = {r["username"] for r in self.db.incoming_requests(me)}
+        outgoing = set(self.db.outgoing_requests(me))
+        users = []
+        for r in rows[:P.USER_SEARCH_LIMIT]:
+            name = r["username"]
+            status = ("friend" if name in friends else "request_received" if name in incoming
+                      else "request_sent" if name in outgoing else "none")
+            users.append({"username": name, "fullname": r["fullname"], "status": status,
+                          "online": self.online_flag(name)})
+        conn.send({"type": "user_list", "query": query, "users": users, "more": more})
+
     def _announce_friendship(self, a, b):
         """a and b are user rows (username, fullname, public_key)."""
         def card(u):
@@ -601,7 +622,7 @@ class TCPChatServer:
         self.chat = chat
         family = socket.AF_INET6 if ":" in host else socket.AF_INET
         self.listener = socket.socket(family, socket.SOCK_STREAM)
-        if hasattr(socket, "SO_REUSEADDR") and not _is_windows():
+        if os.name != "nt":                      # on Windows SO_REUSEADDR would allow port hijacking
             self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.listener.bind((host, port))
         self.listener.listen(128)
@@ -661,13 +682,6 @@ class TCPChatServer:
                 if not self._connections:
                     break
             time.sleep(0.02)
-
-    close = stop
-
-
-def _is_windows():
-    import os
-    return os.name == "nt"
 
 
 def start_server(chat, host, port):
