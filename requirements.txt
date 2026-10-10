@@ -1,0 +1,3 @@
+# Runtime dependencies (client + server)
+bcrypt>=4.2
+cryptography>=42.0

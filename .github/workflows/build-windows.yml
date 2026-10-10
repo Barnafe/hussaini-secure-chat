@@ -1,0 +1,86 @@
+name: Build Windows package
+
+# Runs on every push to main/master, on demand (Actions tab -> "Run workflow"),
+# and when you push a version tag such as v1.0 (then it also makes a GitHub Release).
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write        # only needed so a tagged build can create a Release
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt -r requirements-build.txt
+
+      # The tests never block the build (they were developed on Linux); a warning here means
+      # "look at the log". The two smoke tests further down DO block, because they prove the
+      # real .exe files work.
+      - name: Run the tests
+        continue-on-error: true
+        run: python -m pytest --ignore=tests/test_gui_smoke.py
+
+      - name: Run the window (GUI) test
+        continue-on-error: true
+        run: python -m pytest tests/test_gui_smoke.py
+
+      - name: Build HussainiServer.exe
+        run: pyinstaller --noconfirm --clean --distpath dist --workpath build/server packaging/HussainiServer.spec
+
+      - name: Build HussainiChat.exe
+        run: pyinstaller --noconfirm --clean --distpath dist --workpath build/chat packaging/HussainiChat.spec
+
+      - name: Smoke test - run the server .exe and chat through it
+        run: python packaging/smoke_test.py dist/HussainiServer.exe
+
+      - name: Smoke test - open and close the chat window from the .exe
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist/HussainiChat.exe" -ArgumentList "--selftest" -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            if (Test-Path "dist/hussaini_error.log") { Get-Content "dist/hussaini_error.log" }
+            throw "HussainiChat.exe --selftest failed with exit code $($p.ExitCode)"
+          }
+          Write-Host "HussainiChat.exe opened and closed correctly."
+
+      - name: Assemble the release folder
+        run: python packaging/assemble.py --dist dist --out release
+
+      - name: Upload HussainiChat-Windows
+        uses: actions/upload-artifact@v7
+        with:
+          name: HussainiChat-Windows
+          path: release/HussainiChat-Windows/
+          if-no-files-found: error
+
+      - name: Create a GitHub Release (only when you pushed a tag like v1.0)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" release/HussainiChat-Windows.zip --title "Hussaini Secure Chat ${{ github.ref_name }}" --generate-notes
+
+      - name: Upload build logs if something failed
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-logs
+          path: |
+            build/**/warn-*.txt
+            dist/hussaini_error.log
+          if-no-files-found: ignore

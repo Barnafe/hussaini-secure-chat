@@ -1,0 +1,7 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    { "name": "Run server", "type": "debugpy", "request": "launch", "program": "${workspaceFolder}/run_server.py", "console": "integratedTerminal" },
+    { "name": "Run client", "type": "debugpy", "request": "launch", "program": "${workspaceFolder}/run_client.py", "console": "integratedTerminal" }
+  ]
+}

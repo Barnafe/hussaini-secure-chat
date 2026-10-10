@@ -1,0 +1,16 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+data/*.db
+data/*.db-shm
+data/*.db-wal
+hussaini_error.log
+build/
+dist/
+release/
+*.egg-info/
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json

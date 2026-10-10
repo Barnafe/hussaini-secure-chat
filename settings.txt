@@ -1,0 +1,29 @@
+# ============================================================================
+#  Hussaini Secure Chat - settings
+#  Lines starting with # are comments. Edit a value, save the file, then
+#  close and start the program again.
+# ============================================================================
+
+# ---- SERVER (HussainiServer.exe) -------------------------------------------
+# Network card to listen on. Leave as 0.0.0.0 so other computers can connect.
+server_listen_host = 0.0.0.0
+
+# Port number the server listens on (1-65535). Allow it through Windows
+# Firewall if other computers must connect.
+server_port = 8765
+
+# Where accounts and (encrypted) messages are stored. Delete this file to
+# start again with an empty chat.
+database_file = data/chat.db
+
+# Password hashing strength (4-16). 12 is a good default; higher = slower login.
+bcrypt_rounds = 12
+
+# How much the server prints in its window: DEBUG, INFO, WARNING or ERROR.
+log_level = INFO
+
+# ---- CLIENT (HussainiChat.exe) ---------------------------------------------
+# What the "Server" box in the login window starts with, as host:port.
+#   Same computer as the server:   localhost:8765
+#   Another computer:              192.168.1.20:8765   (the address the server window shows)
+server_address = localhost:8765

@@ -1,0 +1,140 @@
+HUSSAINI SECURE CHAT  -  PRESENTATION GUIDE
+============================================
+
+Target length: 10-12 minutes demo + questions.  Rehearse it twice.
+
+
+BEFORE YOU WALK IN (5 minutes)
+------------------------------
+[ ] Laptop charged and plugged in; close other programs and notifications.
+[ ] Extract the zip to a normal folder (e.g. Desktop\HussainiChat-Windows).
+[ ] Delete data\chat.db so the demo starts with an empty chat.
+[ ] Run start-demo.bat once at home, allow the firewall prompt, then close
+    everything and delete data\chat.db again.
+[ ] Keep this guide, the report, and a notepad open for the passphrases.
+[ ] Optional: "DB Browser for SQLite" (show-database.bat already does the job).
+[ ] Backup plan: a screen recording of the full demo on your phone/laptop.
+
+
+THE STORY (what to say)
+-----------------------
+1. Problem (30 s)
+   Ordinary chat servers can read your messages. We built a chat where the
+   server cannot - messages are encrypted on the sender's computer.
+
+2. Design (60 s)  - point at the architecture slide / report Chapter 3
+   * Client (Tkinter) and server (Python) talk over raw TCP sockets.
+   * The server uses one thread per connected client.
+   * SQLite stores accounts, friends, groups and ENCRYPTED messages.
+   * Messages are JSON frames with a length prefix.
+
+3. Security (90 s)
+   * Passwords: bcrypt hashes - the server never stores the real password.
+   * Registration creates a personal random passphrase on YOUR computer.
+     It becomes a private key; only the PUBLIC key is sent to the server.
+   * Two friends combine "my private key + your public key" (X25519) into
+     the same AES-256-GCM key. The server never has either private key.
+   * AES-GCM also detects tampering: a changed message fails to decrypt.
+   * Group messages: encrypted once, the message key is wrapped separately for
+     every member. People who joined later cannot read older messages.
+
+
+LIVE DEMO (about 6 minutes)
+---------------------------
+Step 1  Double-click start-demo.bat.  "Server window + two clients."
+        Point out the server window: listening on port 8765, SQLite file.
+
+Step 2  REGISTER Alice in window 1 (Full name Alice Adamu, username alice,
+        password Demo@1234).  Show the PASSPHRASE window: "created
+        automatically, shown once, never sent to the server."  Click Copy,
+        tick the box, Continue.
+
+Step 3  REGISTER Bob in window 2 (username bob).  Note his passphrase is
+        different from Alice's.  "Different passphrases, yet they can chat."
+
+Step 4  Sign in both.  Show the ONLINE tab: Alice sees Bob.
+        Send a friend request from Alice, accept it as Bob.
+
+Step 5  CHAT: Alice sends "Hello Bob"; Bob replies.  Show the highlighted "● 1 UNREAD" marker and the counter at the top:
+        send a message while the other conversation is not open.
+
+Step 6  OFFLINE DELIVERY: log Bob out.  Alice sends two messages.  Log Bob in
+        again - the messages arrive immediately.
+
+Step 7  GROUP: create a third user (run HussainiChat.exe again, register
+        carol), add friends, make a group with Alice as admin, send a message,
+        remove Carol and show she loses access.
+
+Step 8  PROOF IT IS ENCRYPTED (the "wow" moment):
+        Double-click  show-database.bat  (no extra software needed). It prints
+        what the server stores: password HASHES and unreadable ciphertext for
+        every message. "This is exactly what the server - or anyone who steals
+        the database - can see."
+        (Optional alternative: open data\chat.db in DB Browser for SQLite.)
+
+Step 9  SECURITY CHECKS (30 s): try a wrong passphrase at login (clear
+        message), and 5 wrong passwords (account locked for a minute).
+
+
+IF SOMETHING GOES WRONG
+-----------------------
+* "Connection failed": the server window is closed -> run start-demo.bat again.
+* Forgot a passphrase mid-demo: register a new user (e.g. alice2).
+* A window hides behind another: use Alt+Tab; arrange the two chat windows
+  side by side before you start (Windows key + Left/Right arrows).
+* Stay calm, say "let me restart that", and continue - examiners care more
+  about your understanding than a perfect run.
+
+
+QUESTIONS YOU WILL PROBABLY GET
+-------------------------------
+Q: Why raw TCP sockets and threads?
+A: It matches the design in Chapter 3: a persistent, bidirectional connection
+   per client. One thread per client keeps the server code simple and is fine
+   for the size of this system. (Limit: thousands of users would need an
+   asynchronous design.)
+
+Q: Why SQLite?
+A: A single file, no extra software to install, ideal for a standalone demo.
+   All access goes through one database class, so another database could be
+   plugged in later.
+
+Q: Can the server read the messages?
+A: No. It stores ciphertext and public keys only. Private keys come from each
+   user's passphrase, which never leaves their computer.
+
+Q: What happens if a user forgets the passphrase?
+A: It cannot be recovered - that is what makes the server unable to read the
+   messages. The user must register again. (Possible future work: an optional
+   recovery code.)
+
+Q: Why AES-GCM and not just AES?
+A: GCM is "authenticated": it protects confidentiality AND detects tampering.
+   We also bind each message to its sender and conversation so it cannot be
+   replayed into another chat.
+
+Q: What are the weaknesses?
+A: Be honest - this scores well.
+   * Plain TCP, no TLS: the account password is sent unencrypted. Next step:
+     wrap the connection in TLS.
+   * The server hands out public keys; users cannot verify them yet (no
+     "safety numbers").
+   * No forward secrecy: a stolen passphrase exposes old messages.
+   * The server can see metadata (who talks to whom, and when).
+
+Q: How did you test it?
+A: Automated tests (pytest): cryptography, database, server, real clients end
+   to end, security attacks (wire sniffing, tampering, replay, SQL injection,
+   oversized/garbage frames) and performance (latency, many clients).
+   The Windows .exe files are built and smoke-tested automatically on GitHub.
+
+Q: What is the performance?
+A: See tests\results\performance.md in the source project (message latency
+   is in the low milliseconds on a laptop).
+
+
+CLOSING (20 s)
+--------------
+"We built a working private chat with accounts, friends, groups, offline
+delivery and end-to-end encryption, tested it automatically, and packaged it
+as a Windows program. Thank you - questions?"
