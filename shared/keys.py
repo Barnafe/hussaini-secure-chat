@@ -144,3 +144,17 @@ def open_group(identity: Identity, group_id: int, sender: str, payload: str,
     except (binascii.Error, ValueError) as exc:
         raise DecryptionError("Malformed encrypted message.") from exc
     return decrypt_message(message_key, sealed, P.group_aad(sender, group_id))
+
+
+# --------------------------------------------------------------------------- #
+# Safety numbers (let two friends confirm they hold each other's real keys)
+# --------------------------------------------------------------------------- #
+def safety_number(public_a_b64: str, public_b_b64: str) -> str:
+    """30 digits in six groups of five. Both friends compute the SAME number from the two public
+    keys; if someone in the middle swapped a key, the numbers would not match."""
+    import hashlib
+    a, b = sorted([public_a_b64, public_b_b64])
+    digest = hashlib.sha256(b"hussaini-safety-number-v1|" + a.encode() + b"|" + b.encode()).digest()
+    digits = str(int.from_bytes(digest, "big") % 10 ** 30).zfill(30)
+    return " ".join(digits[i:i + 5] for i in range(0, 30, 5))
+

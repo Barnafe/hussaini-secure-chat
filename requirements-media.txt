@@ -1,0 +1,5 @@
+# Optional real-time calling dependencies (install in addition to requirements.txt):
+#   pip install -r requirements-media.txt
+numpy>=1.26
+sounddevice>=0.4.6        # microphone + speaker (Windows wheels include PortAudio)
+opencv-python-headless>=4.9   # webcam + JPEG (the "headless" build is enough: the app draws its own window)

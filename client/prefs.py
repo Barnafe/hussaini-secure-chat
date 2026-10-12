@@ -53,6 +53,46 @@ class Prefs:
         self._user(username).setdefault("cleared", {})[key] = int(message_id)
         self._save()
 
+    # ---- local calling devices ------------------------------------------------ #
+    def call_devices(self, username):
+        value = self._user(username).get("call_devices", {})
+        if not isinstance(value, dict):
+            value = {}
+        try:
+            camera_index = max(0, min(4, int(value.get("camera_index", 0) or 0)))
+        except (TypeError, ValueError):
+            camera_index = 0
+        def optional_index(key):
+            item = value.get(key)
+            try:
+                return None if item in (None, "") else max(0, int(item))
+            except (TypeError, ValueError):
+                return None
+        return {
+            "audio_input": optional_index("audio_input"),
+            "audio_output": optional_index("audio_output"),
+            "camera_index": camera_index,
+        }
+
+    def set_call_devices(self, username, audio_input=None, audio_output=None, camera_index=0):
+        def clean_index(value):
+            if value in (None, "", "Default"):
+                return None
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+        try:
+            camera_index = max(0, min(4, int(camera_index)))
+        except (TypeError, ValueError):
+            camera_index = 0
+        self._user(username)["call_devices"] = {
+            "audio_input": clean_index(audio_input),
+            "audio_output": clean_index(audio_output),
+            "camera_index": camera_index,
+        }
+        self._save()
+
     # ---- wallpaper ------------------------------------------------------------ #
     def wallpaper(self, username):
         value = self._user(username).get("wallpaper", WALLPAPERS[0])

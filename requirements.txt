@@ -2,3 +2,5 @@
 bcrypt>=4.2
 cryptography>=42.0
 pillow>=10.1        # client only: profile pictures, rounded shapes and icons
+
+# Optional call media dependencies are in requirements-media.txt

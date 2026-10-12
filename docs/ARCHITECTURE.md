@@ -52,6 +52,11 @@ Client → server
 | `register` | username, password, confirm, fullname, public_key |
 | `login` / `logout` | username, password, public_key / – |
 | `ping` | – (answered with `pong`; sent every 15 s) |
+| `user_search` | query (empty = list everybody) |
+| `change_password` | current, new, confirm |
+| `group_rename` | group_id, name (admin only) |
+| `group_transfer` | group_id, username (admin only: hand over the admin role) |
+| `typing` | to, or group_id (relayed to the other side, never stored) |
 | `friend_request` | to |
 | `friend_respond` | from, accept |
 | `friend_remove` | user |
@@ -61,11 +66,10 @@ Client → server
 | `group_create` | name, members[] |
 | `group_add` / `group_remove` | group_id, username |
 | `group_leave` | group_id |
-| `user_search` | query (empty = list everybody) |
 | `profile_update` | fullname, bio |
 | `avatar_set` | data (base64 JPEG/PNG, `''` removes it) |
 | `avatar_get` | username (answered with `avatar`) |
-| `password_change` | old, new, confirm |
+| `password_change` | old, new, confirm (older form of `change_password`, answered with `password_result`; the window uses `change_password`) |
 
 Server → client
 
@@ -74,6 +78,9 @@ Server → client
 | `register_result`, `login_result`, `pong` | `ok` + message |
 | `state` | friends (with online flag), requests, groups, everyone online |
 | `presence` | a user came online / went offline |
+| `password_changed` | ok + message |
+| `delivered` | peer, ids - the recipient received these messages (second tick) |
+| `typing` | from (and group_id) |
 | `friend_request_in`, `request_sent`, `request_cleared`, `friend_added`, `friend_removed` | friend changes |
 | `message`, `group_message` | ciphertext + sender + id + timestamp (`queued` = delivered from the offline queue) |
 | `history` | ordered ciphertexts for one conversation |
@@ -123,3 +130,8 @@ Server → client
 | PyCryptodome for AES (Table in 3.10) | `cryptography` library (AES-256-GCM, X25519, HKDF) | one library covers AES-GCM and the X25519 key agreement; update the 3.10 table in the report |
 | "Shared secret" style key handling | per-user passphrase, public keys stored on the server | see above |
 
+
+## Voice and video calls
+One-to-one, friends only. The server (`server/app.py`) rings, connects, logs and relays; it never decodes media.
+Clients encrypt every audio/video packet with a per-call AES-256-GCM key (`client/media_engine.py`). The windows
+live in `client/call_ui.py`. Protocol, rules and test list: `CALLS.md`.

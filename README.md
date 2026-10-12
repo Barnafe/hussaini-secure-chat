@@ -22,7 +22,17 @@ report (`ATBU_CHAPTERS_TEACHER.docx`).
 | Encryption | AES-256-GCM (confidentiality **and** tamper detection). Keys come from X25519 key agreement between the two users' passphrase-derived key pairs. |
 | Reliability | Keep-alive pings, auto-reconnect + automatic re-login, flood control, idle clean-up. |
 | Database | **SQLite** only (`data/chat.db`). |
-| Packaging | `HussainiChat.exe` + `HussainiServer.exe` (PyInstaller), built by GitHub Actions. |
+| **Delivery ticks** | One tick = stored by the server, two ticks = delivered to your friend (also when they log in later). |
+| **Chat list** | Newest conversation on top, with a one-line preview of the last message (decrypted on your computer). |
+| **Typing indicator** | "Bob is typing..." appears in the chat (relayed by the server, never stored). |
+| **Chat polish** | "Today / Yesterday" date dividers and a different colour for each sender's name in groups. |
+| **Alerts** | Sound + flashing taskbar button when a message arrives while the window is in the background (switch with the *Sound* box); the title shows the unread count. |
+| **Safety numbers** | *Verify Security* (chat menu / contact panel) in a private chat shows a 30-digit number both friends can compare to be sure nobody swapped their keys; verified friends get a badge, and you are warned if a key changes. |
+| **Change password** | In the app (*Change password* button): asks for the current password first; your passphrase and old chats are not affected. |
+| **Groups** | The admin can also **rename** the group and **hand over** the admin role. |
+| **About box and icon** | Version, credits and technology (*About*); the programs have their own icon. |
+| **Server-owner tools** | `HussainiServer.exe --list-users`, `--backup`, `--reset-password USER`, `--show-db` (or `server-tools.bat`). No internet needed. |
+| Packaging | `HussainiChat.exe` + `HussainiServer.exe` (PyInstaller), plus an optional **installer** (`HussainiChat-Setup.exe`, desktop shortcut), all built by GitHub Actions. |
 
 ## 1. Folder structure
 
@@ -91,10 +101,11 @@ GitHub Release with the zip attached. Full step-by-step: `docs/GITHUB_AND_DELIVE
 **Locally on Windows:**
 
 ```powershell
-pip install -r requirements-build.txt
+pip install -r requirements-build.txt -r requirements-media.txt     # media = voice/video calls
 pyinstaller --noconfirm --clean packaging/HussainiServer.spec
 pyinstaller --noconfirm --clean packaging/HussainiChat.spec
 python packaging/smoke_test.py dist/HussainiServer.exe
+dist\HussainiChat.exe --selftest-calls     # exit code 0 = the calling packages are inside the .exe
 python packaging/assemble.py          # -> release/HussainiChat-Windows(.zip)
 ```
 
@@ -148,8 +159,9 @@ online immediately; others see them at their next login.
 Local-only settings (muted chats, *Clear chat* cut-offs, chat wallpaper) are stored next to the program in
 `client_prefs.json` and never leave the computer. *Clear chat* hides the messages on this computer only.
 
-Not built yet (the buttons show a short notice): voice/video calls and sending photos or files. The *Media & Files*
-and *Shared Documents* boxes stay empty until file sending exists; *Shared Links* is filled from links in the chat.
+Not built yet (the buttons show a short notice): sending photos or files. The *Media & Files* and *Shared
+Documents* boxes stay empty until file sending exists; *Shared Links* is filled from links in the chat.
+Voice and video calls are built: see *Voice and video calls* at the end of this file and `CALLS.md`.
 
 ## 6. Security notes and known limitations (good material for the report)
 
@@ -158,7 +170,7 @@ and *Shared Documents* boxes stay empty until file sending exists; *Shared Links
 * **Passwords:** bcrypt, constant-ish timing for unknown users, 5-failure lockout.
 * **Plain TCP, no TLS:** messages are end-to-end encrypted, but the account **password** is sent unencrypted
   and the server sees metadata (who talks to whom, when). Next step: wrap the socket in TLS.
-* **Key directory trust:** the server hands out public keys; there is no fingerprint / safety-number check yet.
+* **Key directory trust:** the server hands out public keys; friends can compare a safety number (*Verify Security* in the chat menu or the contact panel) to detect a swapped key, but the program cannot check it for you.
 * **No forward secrecy:** whoever learns a passphrase can read that user's past messages.
 * **No passphrase recovery** (by design). A lost passphrase means a new account.
 * One thread per client is simple and fine for a class-sized deployment, not for thousands of users.
@@ -173,3 +185,26 @@ and *Shared Documents* boxes stay empty until file sending exists; *Shared Links
 | Server: *port already in use* | Another server is running, or change `server_port` in `settings.txt`. |
 | Window looks plain / `ModuleNotFoundError: PIL` | Run `pip install -r requirements.txt` (the new look needs Pillow). |
 | Old `data/chat.db` from version 3 | Accounts made before passphrases have no key and are refused at login. Delete `data/chat.db` and register again. |
+
+## Voice and video calls
+
+One-to-one calls between friends, from the phone / video icons in the chat header and the contact panel, or
+by one click on a row of the **Calls** tab (calling back a video call starts a video call).
+
+* **Install the call packages** (once): `pip install -r requirements-media.txt` (numpy, sounddevice, opencv).
+  Without them chat works as before and the call window explains what to install.
+* **What you get:** ringing with a ringtone and an incoming-call popup (Accept / Decline), a "Calling..."
+  window with Cancel, busy / offline / declined / no answer after 30 s, a call window with timer, mute, camera on/off
+  and a small self-view in the corner, and a **Calls** tab with incoming, outgoing and missed calls and their duration.
+  A voice call can be upgraded to video with *Start camera*.
+* **How it travels:** audio is 20 ms mono 16 kHz PCM, video is 320x240 JPEG at about 12 frames per second. Both are
+  encrypted on your computer with AES-256-GCM using a fresh key for every call (derived from the secret you already
+  share with your friend plus the call id); the server only relays ciphertext. Every packet is bound to its call, its
+  sender and its sequence number, so packets cannot be replayed, reordered, edited or reflected back.
+* **A call is refused** (with a clear message) if the person is not your friend, if their key is missing, or if
+  you had verified their safety number and it has since changed - compare safety numbers again first.
+* **Devices:** *Settings > Calling devices* picks microphone, speaker and camera. If a chosen device is unplugged the
+  system default is used. On Windows allow microphone/camera access under *Settings > Privacy*.
+* **Limits (be honest in the report):** voice is uncompressed PCM (about 45 KB/s each way), there is no congestion
+  control, calls need the server to be reachable by both people, and group calls do not exist. The call encryption
+  has not been independently audited.

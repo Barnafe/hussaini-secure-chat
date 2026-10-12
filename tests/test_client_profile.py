@@ -3,7 +3,7 @@ import base64
 import time
 from datetime import datetime, timezone
 
-from client.controller import (clock, day_label, dm_key, find_links, group_key, list_time)
+from client.controller import (clock, day_heading, dm_key, find_links, group_key, list_time)
 from tests.test_client import Peer, PW, pair, srv  # noqa: F401  (srv is a fixture)
 
 FAKE_JPEG = base64.b64encode(b"\xff\xd8\xff\xe0" + b"picture" * 30).decode("ascii")
@@ -13,10 +13,10 @@ def test_time_helpers():
     local = datetime(2026, 10, 10, 15, 5, tzinfo=timezone.utc).astimezone()
     assert clock("2026-10-10 15:05:00") == local.strftime("%I:%M %p").lstrip("0")
     assert not clock("2026-10-10 15:05:00").startswith("0")
-    assert clock("garbage") == "" and day_label("garbage") == "" and list_time(None) == ""
+    assert clock("garbage") == "" and day_heading("garbage") == "" and list_time(None) == ""
     now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-    assert day_label(now).startswith("Today, ") and list_time(now) == clock(now)
-    assert day_label("2001-02-03 12:00:00") == "3 Feb 2001"
+    assert day_heading(now).startswith("Today, ") and list_time(now) == clock(now)
+    assert day_heading("2001-02-03 12:00:00") == "3 Feb 2001"
     assert find_links("go to https://example.com/a?b=1, or www.test.org.") == ["https://example.com/a?b=1", "www.test.org"]
 
 

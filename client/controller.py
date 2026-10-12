@@ -9,14 +9,16 @@ to the network layer, and decrypted only after it arrives. The key comes from th
 user's own passphrase (see shared/keys.py), so the server only ever sees ciphertext.
 """
 import re
+import time
 from datetime import datetime, timezone
 
 from client.network import NetworkClient, normalize_address
 from client.prefs import Prefs
 from shared import protocol as P
 from shared.crypto_utils import PBKDF2_ITERATIONS, DecryptionError
+from client.trust import TrustStore
 from shared.keys import (Identity, PeerKeyError, generate_passphrase, normalize_passphrase,
-                         open_dm, open_group, seal_dm, seal_group)
+                         open_dm, open_group, safety_number, seal_dm, seal_group)
 
 DECRYPT_FAIL = "[Unable to decrypt this message]"
 MAX_TEXT_BYTES = 12_000
@@ -49,7 +51,7 @@ def clock(ts: str) -> str:
     return dt.strftime("%I:%M %p").lstrip("0") if dt else ""
 
 
-def day_label(ts: str, today=None) -> str:
+def day_heading(ts: str, today=None) -> str:
     """'Today, 10 Oct 2026' / 'Yesterday, 9 Oct 2026' / '3 Oct 2026'."""
     dt = local_dt(ts)
     if dt is None:
@@ -80,11 +82,32 @@ def find_links(text: str):
     return [m.group(0).rstrip(".,;:!?)") for m in _URL_RE.finditer(text or "")]
 
 
+TYPING_SECONDS = 5           # how long "Bob is typing..." stays after the last notice
+TYPING_THROTTLE = 3          # send at most one typing notice per conversation every 3 seconds
+
+
+def day_label(ts: str, today=None) -> str:
+    """'Today' / 'Yesterday' / '12 Oct 2026' for a server timestamp, in local time."""
+    try:
+        day = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).astimezone().date()
+    except (TypeError, ValueError):
+        return ""
+    today = today or datetime.now().astimezone().date()
+    delta = (today - day).days
+    if delta == 0:
+        return "Today"
+    if delta == 1:
+        return "Yesterday"
+    return day.strftime("%d %b %Y").lstrip("0")
+
+
 class ChatController:
-    def __init__(self, network_factory=NetworkClient, kdf_iterations=PBKDF2_ITERATIONS, prefs=None):
+    def __init__(self, network_factory=NetworkClient, kdf_iterations=PBKDF2_ITERATIONS, prefs=None,
+                 trust_store=None):
         self._network_factory = network_factory
         self._kdf_iterations = kdf_iterations
         self.prefs = prefs if prefs is not None else Prefs()
+        self.trust = trust_store or TrustStore()
         self.on_update = lambda topic, payload=None: None
         self.network = None
         self.connected = False
@@ -110,6 +133,13 @@ class ChatController:
         self.profiles = {}           # username -> {"fullname", "bio", "avatar_ver"} for everyone we know of
         self.avatars = {}            # username -> (version, base64 picture) - fetched on demand
         self._avatar_asked = set()   # (username, version) already requested
+        self._preview_ids = set()    # (conv key, id) of messages known only as a chat-list preview
+        self.typing = {}             # conv key -> {username: expiry (monotonic seconds)}
+        self._typing_sent = {}       # conv key -> when I last told the server I am typing
+        self.call_history = []
+        self.active_call = None      # the one call being tracked: ringing in, ringing out, or running
+        self._call_pending_until = 0.0   # a call request is in flight: refuse a second one meanwhile
+        self._pending_new_password = None
         self._pending_auth = None
         self._pending_identity = None    # key pair of the login attempt in flight
         self._pending_register = None    # {"username", "passphrase"} of the registration in flight
@@ -172,6 +202,7 @@ class ChatController:
     # polling & event handling
     # ------------------------------------------------------------------ #
     def poll(self):
+        self._expire_typing()
         if self.network is None:
             return 0
         events = self.network.drain()
@@ -194,6 +225,7 @@ class ChatController:
 
     def _on_disconnected(self, ev):
         self.connected = False
+        self._drop_call_on_disconnect()
         if self._login_msg:
             self._pending_auth = self._login_msg           # log in again automatically
         self._notify("connection", "Connection lost - reconnecting...")
@@ -243,6 +275,7 @@ class ChatController:
         self.requests_out = set(ev.get("requests_out", []))
         self.groups = {g["group_id"]: g for g in ev.get("groups", [])}
         self._learn_keys()
+        self._load_previews(ev.get("last") or {})
         self.online_users = {u["username"]: u["fullname"] for u in ev.get("online", [])}
         for u in ev.get("online", []):
             self._learn_profile(u)
@@ -322,6 +355,7 @@ class ChatController:
         self._notify("notice", ev.get("message", ""))
 
     def _on_error(self, ev):
+        self._call_pending_until = 0.0            # (a refused call request must not block the next try)
         self._notify("error", ev.get("message", "Error"))
 
     def _on_kicked(self, ev):
@@ -406,6 +440,19 @@ class ChatController:
                 if m.get("public_key"):
                     self.peer_keys[m["username"]] = m["public_key"]
 
+    def _load_previews(self, last):
+        """Decrypt the newest message of every conversation so the chat list can preview it."""
+        for peer, m in (last.get("dm") or {}).items():
+            if peer in self.friends:
+                text, ok = self._decrypt_dm(m)
+                self._store(dm_key(peer), m["id"], m["from"], text, ok, m["timestamp"])
+                self._preview_ids.add((dm_key(peer), m["id"]))
+        for gid, m in (last.get("group") or {}).items():
+            if int(gid) in self.groups:
+                text, ok = self._decrypt_group(m["from"], int(gid), m["payload"])
+                self._store(group_key(gid), m["id"], m["from"], text, ok, m["timestamp"])
+                self._preview_ids.add((group_key(gid), m["id"]))
+
     def _decrypt_dm(self, ev):
         other = ev["to"] if ev["from"] == self.me["username"] else ev["from"]
         try:
@@ -421,9 +468,11 @@ class ChatController:
         except DecryptionError:
             return DECRYPT_FAIL, False
 
-    def _store(self, key, mid, sender, text, ok, timestamp):
-        self.messages.setdefault(key, {})[mid] = {
-            "id": mid, "from": sender, "text": text, "ok": ok, "timestamp": timestamp}
+    def _store(self, key, mid, sender, text, ok, timestamp, delivered=False):
+        old = self.messages.setdefault(key, {}).get(mid)
+        self.messages[key][mid] = {
+            "id": mid, "from": sender, "text": text, "ok": ok, "timestamp": timestamp,
+            "delivered": bool(delivered) or bool(old and old.get("delivered"))}
 
     def _bump_unread(self, key, sender):
         if sender != self.me["username"] and key != self.current:
@@ -435,19 +484,27 @@ class ChatController:
         other = ev["to"] if ev["from"] == me else ev["from"]
         key = dm_key(other)
         text, ok = self._decrypt_dm(ev)
-        fresh = ev["id"] not in self.messages.get(key, {})
-        self._store(key, ev["id"], ev["from"], text, ok, ev["timestamp"])
+        fresh = ev["id"] not in self.messages.get(key, {}) or (key, ev["id"]) in self._preview_ids
+        self._preview_ids.discard((key, ev["id"]))
+        self._store(key, ev["id"], ev["from"], text, ok, ev["timestamp"], ev.get("delivered", False))
+        self._stop_typing(key, ev["from"])
         if fresh:
             self._bump_unread(key, ev["from"])
+            if ev["from"] != me:
+                self._notify("incoming", {"key": key, "from": ev["from"], "queued": bool(ev.get("queued"))})
         self._notify("conversation", key)
 
     def _on_group_message(self, ev):
         key = group_key(ev["group_id"])
         text, ok = self._decrypt_group(ev["from"], ev["group_id"], ev["payload"])
-        fresh = ev["id"] not in self.messages.get(key, {})
+        fresh = ev["id"] not in self.messages.get(key, {}) or (key, ev["id"]) in self._preview_ids
+        self._preview_ids.discard((key, ev["id"]))
         self._store(key, ev["id"], ev["from"], text, ok, ev["timestamp"])
+        self._stop_typing(key, ev["from"])
         if fresh:
             self._bump_unread(key, ev["from"])
+            if ev["from"] != self.me["username"]:
+                self._notify("incoming", {"key": key, "from": ev["from"], "queued": bool(ev.get("queued"))})
         self._notify("conversation", key)
 
     def _on_last_message(self, ev):
@@ -459,6 +516,8 @@ class ChatController:
             other = ev["to"] if ev["from"] == self.me["username"] else ev["from"]
             key = dm_key(other)
             text, ok = self._decrypt_dm(ev)
+        if ev["id"] not in self.messages.get(key, {}):
+            self._preview_ids.add((key, ev["id"]))     # a real delivery of it later still counts as new
         self._store(key, ev["id"], ev["from"], text, ok, ev["timestamp"])
         self._notify("conversation", key)
 
@@ -467,14 +526,70 @@ class ChatController:
             key = dm_key(ev["with"])
             for m in ev["messages"]:
                 text, ok = self._decrypt_dm(m)
-                self._store(key, m["id"], m["from"], text, ok, m["timestamp"])
+                self._store(key, m["id"], m["from"], text, ok, m["timestamp"], m.get("delivered", False))
         else:
             key = group_key(ev["group_id"])
             for m in ev["messages"]:
                 text, ok = self._decrypt_group(m["from"], ev["group_id"], m["payload"])
                 self._store(key, m["id"], m["from"], text, ok, m["timestamp"])
         self.loaded.add(key)
+        self._preview_ids = {pid for pid in self._preview_ids if pid[0] != key}
         self._notify("conversation", key)
+
+    def _on_delivered(self, ev):
+        """The recipient came online and received messages that were waiting: show the second tick."""
+        key = dm_key(ev.get("peer", ""))
+        for mid in ev.get("ids", []):
+            if mid in self.messages.get(key, {}):
+                self.messages[key][mid]["delivered"] = True
+        self._notify("conversation", key)
+
+    def _on_password_changed(self, ev):
+        if ev.get("ok") and self._login_msg:
+            self._login_msg = dict(self._login_msg, password=self._pending_new_password or self._login_msg["password"])
+        self.call_history = []
+        self.active_call = None
+        self._pending_new_password = None
+        self._notify("password_changed", ev)
+        self._notify("password_result", ev)
+
+    # ---- typing indicator ---------------------------------------------- #
+    def _on_typing(self, ev):
+        key = group_key(ev["group_id"]) if "group_id" in ev else dm_key(ev["from"])
+        self.typing.setdefault(key, {})[ev["from"]] = time.monotonic() + TYPING_SECONDS
+        self._notify("typing", key)
+
+    def _stop_typing(self, key, username):
+        if self.typing.get(key, {}).pop(username, None) is not None:
+            self._notify("typing", key)
+
+    def _expire_typing(self):
+        now = time.monotonic()
+        for key in list(self.typing):
+            gone = [u for u, until in self.typing[key].items() if until <= now]
+            for u in gone:
+                del self.typing[key][u]
+            if gone:
+                self._notify("typing", key)
+
+    def typing_names(self, key):
+        """Display names of the people currently typing in a conversation."""
+        now = time.monotonic()
+        return [self.name_of(u) for u, until in self.typing.get(key, {}).items() if until > now]
+
+    def notify_typing(self):
+        """Call on every key press in the message box; tells the other side at most every 3 seconds."""
+        key = self.current
+        if not key or self.network is None or not self.connected:
+            return
+        now = time.monotonic()
+        if now - self._typing_sent.get(key, 0) < TYPING_THROTTLE:
+            return
+        self._typing_sent[key] = now
+        if key.startswith("dm:"):
+            self.network.send({"type": "typing", "to": key[3:]})
+        else:
+            self.network.send({"type": "typing", "group_id": int(key[6:])})
 
     # ------------------------------------------------------------------ #
     # actions used by the GUI
@@ -526,6 +641,156 @@ class ChatController:
             self._notify("error", "Message is too long for this group.")
             return False
         return self.network.send({"type": "send_group", "group_id": gid, "payload": payload})
+
+    # ---- calls ---------------------------------------------------------- #
+    # The window hears about calls through ``call_incoming`` (someone is ringing me) and ``call_status``
+    # (payload["status"]: ringing / accepted / busy / offline / declined / cancelled / no_answer / completed /
+    # connection_lost, or one of the local refusals in CALL_REFUSALS). Only the call being tracked in
+    # ``active_call`` is ever acted on, so a late message about an old call cannot disturb a new one.
+    def call_block_reason(self, username):
+        """Why a call with this friend must not start (None = fine). Calls use the same keys as chat."""
+        if self.me is None or not self.logged_in:
+            return "offline"
+        if username not in self.friends:
+            return "invalid_peer"
+        if self.active_call or time.monotonic() < self._call_pending_until:
+            return "in_call"
+        if not self.peer_keys.get(username):
+            return "no_key"
+        if self.verification_state(username) == "changed":
+            return "key_changed"
+        return None
+
+    def start_call(self, username, media="audio"):
+        if media not in ("audio", "video"):
+            media = "audio"
+        reason = self.call_block_reason(username)
+        if reason is None and (not self.network or not self.connected):
+            reason = "offline"
+        if reason:
+            self._notify("call_status", {"status": reason, "peer": username})
+            return False
+        self._call_pending_until = time.monotonic() + 4
+        return self.network.send({"type": "call_start", "to": username, "media": media})
+
+    def answer_call(self, call_id, accept=True):
+        call = self.active_call
+        if not self.network or not call or call.get("call_id") != call_id:
+            return False
+        if accept:
+            reason = self.call_block_reason_for_incoming(call.get("caller", ""))
+            if reason:                                    # cannot be answered safely: decline and say why
+                self._notify("call_status", {"status": reason, "peer": call.get("caller", "")})
+                accept = False
+        return self.network.send({"type": "call_accept" if accept else "call_decline", "call_id": call_id})
+
+    def call_block_reason_for_incoming(self, caller):
+        if not self.peer_keys.get(caller):
+            return "no_key"
+        if self.verification_state(caller) == "changed":
+            return "key_changed"
+        return None
+
+    def end_call(self):
+        if not self.network or not self.active_call:
+            return False
+        return self.network.send({"type": "call_end", "call_id": self.active_call.get("call_id", "")})
+
+    def send_call_media(self, call_id, kind, seq, payload):
+        if not self.network or not self.connected:
+            return False
+        return self.network.send({"type": "call_media", "call_id": call_id,
+                                  "kind": kind, "seq": int(seq), "payload": payload}, quiet=True)
+
+    def request_call_history(self):
+        if self.network and self.connected:
+            self.network.send({"type": "call_history"})
+
+    def call_peer(self):
+        """The friend in the call being tracked (or None)."""
+        call = self.active_call
+        if not call:
+            return None
+        return call.get("callee") if call.get("caller") == (self.me or {}).get("username") else call.get("caller")
+
+    def _call_is_current(self, ev):
+        call = self.active_call
+        return bool(call) and bool(ev.get("call_id")) and call.get("call_id") == ev.get("call_id")
+
+    def _on_call_incoming(self, ev):
+        if self.active_call:                              # already busy (the server prevents this; be safe)
+            if self.network:
+                self.network.send({"type": "call_decline", "call_id": ev.get("call_id", "")})
+            return
+        self.active_call = dict(ev, status="ringing")
+        self._notify("call_incoming", ev)
+
+    def _on_call_result(self, ev):
+        self._call_pending_until = 0.0
+        status = ev.get("status")
+        if status == "ringing" and ev.get("call_id"):
+            if self.active_call and self.active_call.get("call_id") == ev["call_id"]:
+                return                                    # (cannot happen: the server answers in order)
+            self.active_call = dict(ev)
+        self._notify("call_status", dict(ev))
+
+    def _on_call_accepted(self, ev):
+        if not self._call_is_current(ev):
+            return
+        self.active_call.update(status="active", media=ev.get("media", self.active_call.get("media")),
+                                peer=ev.get("peer"))
+        self._notify("call_status", dict(ev, status="accepted"))
+
+    def _on_call_ended(self, ev):
+        if not self._call_is_current(ev):
+            return                                        # a message about a call I am not in: ignore
+        call, self.active_call = self.active_call, None
+        me = (self.me or {}).get("username")
+        peer = call.get("callee") if call.get("caller") == me else call.get("caller")
+        self._notify("call_status", {"type": "call_ended", "call_id": ev["call_id"], "status": ev.get("status", ""),
+                                     "peer": peer, "media": call.get("media", "audio"),
+                                     "incoming": call.get("callee") == me,
+                                     "was_active": call.get("status") == "active"})
+        self.request_call_history()
+
+    def _drop_call_on_disconnect(self):
+        """My connection dropped: the server has hung the call up, so close it here too."""
+        if self.active_call:
+            ev = {"type": "call_ended", "call_id": self.active_call.get("call_id"), "status": "connection_lost"}
+            self._on_call_ended(ev)
+
+    def _on_call_history(self, ev):
+        calls = ev.get("calls", [])
+        self.call_history = calls if isinstance(calls, list) else []
+        self._notify("call_history", self.call_history)
+
+    def _on_call_media(self, ev):
+        if self._call_is_current(ev):
+            self._notify("call_media", ev)
+
+    def call_rows(self):
+        """The call log prepared for display: newest first, from my point of view."""
+        me = (self.me or {}).get("username")
+        rows = []
+        for c in self.call_history:
+            outgoing = c.get("caller") == me
+            peer = c.get("callee") if outgoing else c.get("caller")
+            status, answered = c.get("status", ""), bool(c.get("answered"))
+            if status in ("completed", "connection_lost") and answered:
+                outcome = "Outgoing" if outgoing else "Incoming"
+            elif status == "declined":
+                outcome = "Declined"
+            elif outgoing:
+                outcome = {"busy": "Busy", "cancelled": "Cancelled"}.get(status, "No answer")
+            else:
+                outcome = "Missed"
+            seconds = int(c.get("duration") or 0)
+            rows.append({"call": c, "username": peer or "", "name": self.name_of(peer or ""),
+                         "media": c.get("media", "audio"), "outgoing": outgoing, "outcome": outcome,
+                         "missed": outcome == "Missed", "duration": seconds,
+                         "duration_text": f"{seconds // 60}:{seconds % 60:02d}" if seconds else "",
+                         "when": local_time(c.get("started", ""))})
+        return rows
 
     def send_friend_request(self, username):
         self.network.send({"type": "friend_request", "to": username})
@@ -588,16 +853,6 @@ class ChatController:
             return False
         return self.network.send({"type": "avatar_set", "data": b64})
 
-    def change_password(self, old, new, confirm):
-        if not old:
-            self._notify("password_result", {"ok": False, "message": "Enter your current password."})
-            return False
-        error = P.validate_new_password(new, confirm)
-        if error:
-            self._notify("password_result", {"ok": False, "message": error})
-            return False
-        return self.network.send({"type": "password_change", "old": old, "new": new, "confirm": confirm})
-
     def set_muted(self, key, muted):
         self.prefs.set_muted(self.me["username"], key, muted)
         self._notify("unread", key)
@@ -611,6 +866,48 @@ class ChatController:
         if ids:
             self.prefs.set_cleared(self.me["username"], key, max(ids))
         self._notify("conversation", key)
+
+    def change_password(self, current, new, confirm):
+        """Change my password. The answer arrives as a "password_changed" update (also sent as "password_result")."""
+        error = P.validate_password(new, confirm)
+        if not current:
+            error = "Enter your current password."
+        if error:
+            ev = {"ok": False, "message": error}
+            self._notify("password_changed", ev)
+            self._notify("password_result", ev)
+            return False
+        self._pending_new_password = new
+        return self.network.send({"type": "change_password", "current": current, "new": new, "confirm": confirm})
+
+    def group_rename(self, gid, name):
+        self.network.send({"type": "group_rename", "group_id": gid, "name": name})
+
+    def group_transfer(self, gid, username):
+        self.network.send({"type": "group_transfer", "group_id": gid, "username": username})
+
+    # ---- safety numbers -------------------------------------------------- #
+    def safety_number_for(self, peer):
+        key = self.peer_keys.get(peer)
+        if not key or self.identity is None:
+            return None
+        return safety_number(self.identity.public_key_b64, key)
+
+    def verification_state(self, peer):
+        """verified / changed (a verified friend's key is different now!) / unverified / unknown."""
+        number = self.safety_number_for(peer)
+        if number is None:
+            return "unknown"
+        saved = self.trust.verified_number(self.me["username"], peer)
+        if saved is None:
+            return "unverified"
+        return "verified" if saved == number else "changed"
+
+    def mark_verified(self, peer):
+        number = self.safety_number_for(peer)
+        if number:
+            self.trust.mark(self.me["username"], peer, number)
+            self._notify("verification", peer)
 
     def logout(self):
         if self.network is not None and self.connected:
@@ -689,13 +986,32 @@ class ChatController:
         g = self.groups.get(int(key[6:]))
         return f"{g['name']} - {len(g['members'])} members" if g else ""
 
+    def last_message_id(self, key):
+        return max(self.messages.get(key, {}), default=0)
+
     def friend_list(self):
-        """[(username, fullname, online)] - online first, then by name."""
+        """[(username, fullname, online)] - newest conversation first, then online, then by name."""
         rows = [(u, f["fullname"], f["online"]) for u, f in self.friends.items()]
-        return sorted(rows, key=lambda r: (not r[2], r[1].lower()))
+        return sorted(rows, key=lambda r: (-self.last_message_id(dm_key(r[0])), not r[2], r[1].lower()))
 
     def group_list(self):
-        return sorted(self.groups.values(), key=lambda g: g["name"].lower())
+        return sorted(self.groups.values(),
+                      key=lambda g: (-self.last_message_id(group_key(g["group_id"])), g["name"].lower()))
+
+    def preview(self, key, limit=30):
+        """One-line preview of the newest message of a conversation ('' if nothing is known yet)."""
+        msgs = self.messages.get(key)
+        if not msgs:
+            return ""
+        m = msgs[max(msgs)]
+        text = " ".join(m["text"].split()) if m["ok"] else "[encrypted]"
+        if len(text) > limit:
+            text = text[:limit - 1].rstrip() + "…"
+        if self.me and m["from"] == self.me["username"]:
+            return "You: " + text
+        if key.startswith("group:"):
+            return self.name_of(m["from"]).split(" ")[0] + ": " + text
+        return text
 
     def online_list(self):
         return sorted(self.online_users.items(), key=lambda kv: kv[1].lower())

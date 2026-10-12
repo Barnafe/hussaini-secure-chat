@@ -2,7 +2,7 @@
 
     python packaging/assemble.py --dist dist --out release
 
-Takes HussainiServer.exe and HussainiChat.exe from --dist and adds start-demo.bat, show-database.bat,
+Takes HussainiServer.exe and HussainiChat.exe from --dist and adds start-demo.bat, show-database.bat, server-tools.bat,
 settings.txt, README.txt, PRESENTATION_GUIDE.txt and an empty data folder.
 Result:  <out>/HussainiChat-Windows/   and   <out>/HussainiChat-Windows.zip
 """
@@ -19,6 +19,7 @@ EXES = ("HussainiServer.exe", "HussainiChat.exe")
 TEXT_FILES = [  # (source, name in the release)
     (os.path.join(HERE, "windows", "start-demo.bat"), "start-demo.bat"),
     (os.path.join(HERE, "windows", "show-database.bat"), "show-database.bat"),
+    (os.path.join(HERE, "windows", "server-tools.bat"), "server-tools.bat"),
     (os.path.join(HERE, "windows", "README.txt"), "README.txt"),
     (os.path.join(HERE, "windows", "PRESENTATION_GUIDE.txt"), "PRESENTATION_GUIDE.txt"),
     (os.path.join(ROOT, "settings.txt"), "settings.txt"),

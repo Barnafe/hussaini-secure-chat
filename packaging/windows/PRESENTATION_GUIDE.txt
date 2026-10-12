@@ -61,11 +61,21 @@ Step 5  CHAT: Alice sends "Hello Bob"; Bob replies.  Show the highlighted "● 1
         send a message while the other conversation is not open.
 
 Step 6  OFFLINE DELIVERY: log Bob out.  Alice sends two messages.  Log Bob in
-        again - the messages arrive immediately.
+        again - the messages arrive immediately.  Point out the TICKS: one tick
+        while Bob was offline, two ticks the moment he logged in.  Also show
+        "Bob is typing..." (type in Bob's window while Alice watches), the chat
+        list (newest chat on top with a preview) and the sound/taskbar flash
+        when a message arrives while the window is in the background.
 
 Step 7  GROUP: create a third user (run HussainiChat.exe again, register
         carol), add friends, make a group with Alice as admin, send a message,
         remove Carol and show she loses access.
+
+Step 7b ACCOUNT TOOLS: Group admin: Groups > Manage > Rename / Make admin.
+        Click CHANGE PASSWORD (header) and change Alice's password; log out and
+        in again with the new one.  Click VERIFY in a private chat: both friends
+        see the same 30-digit safety number - "this proves nobody is
+        intercepting".  Click ABOUT to show the version and credits.
 
 Step 8  PROOF IT IS ENCRYPTED (the "wow" moment):
         Double-click  show-database.bat  (no extra software needed). It prints

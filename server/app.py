@@ -16,6 +16,7 @@ thread running ``ChatServer.handle_connection``. Frames are length-prefixed JSON
 (see shared/protocol.py).
 """
 import logging
+import uuid
 import socket
 import threading
 import time
@@ -30,6 +31,8 @@ log = logging.getLogger("chat.server")
 SEND_TIMEOUT = 10          # seconds to wait for a slow client before giving up on one frame
 IDLE_TIMEOUT = 90          # seconds of silence before a client is dropped (clients ping every 15 s)
 MAX_CONNECTIONS = 500
+RING_SECONDS = 30          # an unanswered call stops ringing after this long
+MEDIA_RATE = (200, 1.0)    # most call-media packets one user may relay per second (a real call needs ~65)
 
 
 class Connection:
@@ -85,6 +88,13 @@ class Session:
         self.bio = bio
         self.avatar_ver = avatar_ver
         self.sent = deque()          # timestamps, for flood control
+        self.typing_sent = deque()   # timestamps of typing notices (separate, lighter limit)
+        self.media_sent = deque()    # timestamps of relayed call-media packets
+        # Messages are only pushed to a session once its login backlog has been sent (see _deliver_message).
+        self.ready = False
+        self.pending = False         # a message arrived while the backlog was being sent: look once more
+        self.flushed = set()         # (type, id) of messages already sent in the login backlog
+        self.state_lock = threading.Lock()
 
 
 class ChatServer:
@@ -99,6 +109,9 @@ class ChatServer:
         self.idle_timeout = idle_timeout
         self.lock = threading.RLock()    # guards ``sessions`` and ``failed``
         self.sessions = {}               # username -> Session
+        self.calls = {}                  # ringing / active calls by id
+        self._call_timers = {}           # call id -> ring timeout timer
+        self.db.close_stale_calls()      # a call cannot survive a server restart
         self.failed = {}                 # username -> [failure count, locked_until]
         # Used so that "unknown user" takes as long as "wrong password".
         self._dummy_hash = hash_password("not-a-real-password", bcrypt_rounds)
@@ -110,6 +123,10 @@ class ChatServer:
             "send_dm": self.on_send_dm,
             "send_group": self.on_send_group,
             "history": self.on_history,
+            "change_password": self.on_change_password,
+            "group_rename": self.on_group_rename,
+            "group_transfer": self.on_group_transfer,
+            "typing": self.on_typing,
             "group_create": self.on_group_create,
             "group_add": self.on_group_add,
             "group_remove": self.on_group_remove,
@@ -119,6 +136,9 @@ class ChatServer:
             "avatar_set": self.on_avatar_set,
             "avatar_get": self.on_avatar_get,
             "password_change": self.on_password_change,
+            "call_start": self.on_call_start, "call_accept": self.on_call_accept,
+            "call_decline": self.on_call_decline, "call_end": self.on_call_end,
+            "call_history": self.on_call_history, "call_media": self.on_call_media,
         }
 
     # ------------------------------------------------------------------ #
@@ -129,6 +149,24 @@ class ChatServer:
         if s is None:
             return False
         return s.conn.send(obj)
+
+    def _deliver_message(self, username, event):
+        """Push a chat message to someone who is online RIGHT NOW. True = delivered live.
+
+        A session that is still receiving its login backlog is not sent the message directly (it would
+        arrive before the login reply, out of order, or twice). The message just stays queued in the
+        database and the login code is told to flush once more, so it arrives exactly once, in order.
+        """
+        s = self.sessions.get(username)
+        if s is None:
+            return False
+        with s.state_lock:
+            if not s.ready:
+                s.pending = True
+                return False
+            if (event.get("type"), event.get("id")) in s.flushed:
+                return True                       # the login backlog already carried it: never send it twice
+        return s.conn.send(event)
 
     @staticmethod
     def _error(conn, message, code=None):
@@ -219,6 +257,7 @@ class ChatServer:
                 del self.sessions[session.username]
             remaining = len(self.sessions)
         if current:
+            self._end_calls_of(session.username, "connection_lost")
             self._broadcast_presence(session.username, session.fullname, False)
             log.info("%s disconnected (%d online)", session.username, remaining)
 
@@ -312,11 +351,18 @@ class ChatServer:
             old.conn.send({"type": "kicked",
                            "message": "You were logged out because your account logged in elsewhere."})
             old.conn.close()
+            self._end_calls_of(username, "connection_lost")   # the old session's calls died with it
         conn.send({"type": "login_result", "ok": True, "message": P.MSG_LOGIN_OK,
                    "user": {"username": username, "fullname": user["fullname"],
                             "bio": session.bio, "avatar_ver": session.avatar_ver}})
         self._send_state(session)
-        self._flush_offline(session)
+        while True:                                   # everything queued while they were away, then go "ready"
+            self._flush_offline(session)
+            with session.state_lock:
+                if not session.pending:
+                    session.ready = True
+                    break
+                session.pending = False
         self._send_previews(session)
         self._broadcast_presence(username, user["fullname"], True)
         log.info("%s logged in (%d online)", username, online)
@@ -336,7 +382,18 @@ class ChatServer:
             "requests_out": self.db.outgoing_requests(me),
             "groups": self.db.groups_for_user(me),
             "online": online,
+            "last": self._last_messages(me),
         })
+
+    def _last_messages(self, me):
+        """Newest ciphertext of every conversation, so the chat list can show previews at login."""
+        dm = {peer: {"id": r["message_id"], "from": r["sender"], "to": r["receiver"],
+                     "payload": r["encrypted_message"], "timestamp": r["timestamp"]}
+              for peer, r in self.db.last_direct_messages(me).items()}
+        group = {str(gid): {"id": r["message_id"], "from": r["sender"],
+                            "payload": r["encrypted_message"], "timestamp": r["timestamp"]}
+                 for gid, r in self.db.last_group_messages(me).items()}
+        return {"dm": dm, "group": group}
 
     # ------------------------------------------------------------------ #
     # offline delivery
@@ -345,7 +402,8 @@ class ChatServer:
     def _dm_event(row, queued=False):
         return {"type": "message", "id": row["message_id"], "from": row["sender"],
                 "to": row["receiver"], "payload": row["encrypted_message"],
-                "timestamp": row["timestamp"], "queued": queued}
+                "timestamp": row["timestamp"], "queued": queued,
+                "delivered": bool(row.get("delivered", 0))}
 
     @staticmethod
     def _group_event(row, queued=False):
@@ -355,15 +413,22 @@ class ChatServer:
 
     def _flush_offline(self, session):
         me = session.username
-        delivered = []
+        delivered, by_sender = [], {}
         for row in self.db.undelivered_messages(me):
-            if session.conn.send(self._dm_event(row, queued=True)):
+            event = self._dm_event(row, queued=True)
+            if session.conn.send(event):
+                session.flushed.add((event["type"], event["id"]))
                 delivered.append(row["message_id"])
+                by_sender.setdefault(row["sender"], []).append(row["message_id"])
         self.db.mark_delivered(delivered)
+        for sender, ids in by_sender.items():             # second tick for the senders who are online
+            self._send_to(sender, {"type": "delivered", "peer": me, "ids": ids})
         for g in self.db.groups_for_user(me):
             last = None
             for row in self.db.group_backlog(g["group_id"], me):
-                if session.conn.send(self._group_event(row, queued=True)):
+                event = self._group_event(row, queued=True)
+                if session.conn.send(event):
+                    session.flushed.add((event["type"], event["id"]))
                     last = row["message_id"]
             if last is not None:
                 self.db.set_group_cursor(g["group_id"], me, last)
@@ -529,6 +594,7 @@ class ChatServer:
         if not other or not self.db.are_friends(me, other):
             return self._error(conn, "That user is not in your friends list.")
         self.db.remove_friendship(me, other)
+        self._end_calls_of(me, "completed", with_user=other)    # no calls between people who are not friends
         conn.send({"type": "friend_removed", "username": other})
         self._send_to(other, {"type": "friend_removed", "username": me})
 
@@ -557,9 +623,10 @@ class ChatServer:
         mid, ts = self.db.save_message(me, target, payload)
         event = self._dm_event({"message_id": mid, "sender": me, "receiver": target,
                                 "encrypted_message": payload, "timestamp": ts})
-        if self._send_to(target, event):
+        delivered = self._deliver_message(target, event)
+        if delivered:
             self.db.mark_delivered([mid])
-        conn.send(event)                                  # echo back to the sender
+        conn.send(dict(event, delivered=bool(delivered)))   # echo back to the sender (with the tick state)
 
     # ------------------------------------------------------------------ #
     # groups
@@ -675,8 +742,8 @@ class ChatServer:
         event = self._group_event({"message_id": mid, "group_id": gid, "sender": me,
                                    "encrypted_message": payload, "timestamp": ts})
         for m in group["members"]:
-            if self._send_to(m["username"], event):
-                self.db.set_group_cursor(gid, m["username"], mid)
+            if self._deliver_message(m["username"], event):
+                self.db.set_group_cursor_if_caught_up(gid, m["username"], mid)
 
     # ------------------------------------------------------------------ #
     # history
@@ -693,7 +760,8 @@ class ChatServer:
             rows = self.db.direct_history(me, other, limit)
             conn.send({"type": "history", "kind": "dm", "with": other, "messages": [
                 {"id": r["message_id"], "from": r["sender"], "to": r["receiver"],
-                 "payload": r["encrypted_message"], "timestamp": r["timestamp"]} for r in rows]})
+                 "payload": r["encrypted_message"], "timestamp": r["timestamp"],
+                 "delivered": bool(r["delivered"])} for r in rows]})
             # Everything shown in the history counts as delivered.
             self.db.mark_delivered([r["message_id"] for r in rows if r["receiver"] == me])
         elif kind == "group":
@@ -709,6 +777,233 @@ class ChatServer:
                 self.db.set_group_cursor(group["group_id"], me, rows[-1]["message_id"])
         else:
             self._error(conn, "Unknown history request.")
+
+
+    # ------------------------------------------------------------------ #
+    # account: change password
+    # ------------------------------------------------------------------ #
+    def on_change_password(self, session, msg):
+        me, conn = session.username, session.conn
+
+        def result(ok, text):
+            conn.send({"type": "password_changed", "ok": ok, "message": text})
+
+        if self._locked(me):
+            return result(False, "Too many failed attempts. Please try again in a minute.")
+        current, new = msg.get("current"), msg.get("new")
+        user = self.db.get_user(me)
+        if not isinstance(current, str) or not user or not verify_password(current, user["password"]):
+            self._record_failure(me)
+            return result(False, "Your current password is incorrect.")
+        error = P.validate_password(new, msg.get("confirm"))
+        if error:
+            return result(False, error)
+        if new == current:
+            return result(False, "Choose a password that is different from the current one.")
+        self.db.update_password(me, hash_password(new, self.bcrypt_rounds))
+        with self.lock:
+            self.failed.pop(me, None)
+        log.info("%s changed their password", me)
+        result(True, "Password changed successfully.")
+
+    # ------------------------------------------------------------------ #
+    # groups: rename and hand over the admin role
+    # ------------------------------------------------------------------ #
+    def on_group_rename(self, session, msg):
+        group = self._member_group(session, msg)
+        if not group:
+            return
+        if group["admin"] != session.username:
+            return self._error(session.conn, "Only the group admin can rename the group.")
+        name = self._text(msg, "name", P.MAX_GROUP_NAME)
+        if not name:
+            return self._error(session.conn, "Group name is required.")
+        self.db.rename_group(group["group_id"], name)
+        self._push_group_update(group["group_id"])
+
+    def on_group_transfer(self, session, msg):
+        group = self._member_group(session, msg)
+        if not group:
+            return
+        if group["admin"] != session.username:
+            return self._error(session.conn, "Only the group admin can hand over the admin role.")
+        target = P.normalize_username(msg.get("username"))
+        if target == session.username or target not in [m["username"] for m in group["members"]]:
+            return self._error(session.conn, "Pick another member of the group.")
+        self.db.set_group_admin(group["group_id"], target)
+        self._push_group_update(group["group_id"])
+
+    # ------------------------------------------------------------------ #
+    # typing indicator (relayed, never stored)
+    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    # calls: 1-to-1, friends only. The server rings, connects and relays; it never sees the media
+    # (it is encrypted on the clients) and keeps only the call log.
+    # ------------------------------------------------------------------ #
+    def _log_instant_call(self, caller, callee, media, status):
+        """A call that never rang (busy / offline) still shows up in both users' call history."""
+        self.db.create_call(uuid.uuid4().hex, caller, callee, media, status)
+
+    def on_call_start(self, session, msg):
+        me, conn = session.username, session.conn
+        target = P.normalize_username(msg.get("to"))
+        media = msg.get("media", "audio")
+        if media not in ("audio", "video"):
+            return self._error(conn, "Unsupported call type.")
+        if not target or target == me or not self.db.are_friends(me, target):
+            return self._error(conn, "Calls are only available between friends.")
+        if not self._allow(session):
+            return self._error(conn, "You are calling too fast. Slow down.")
+        with self.lock:
+            if target not in self.sessions:
+                state = "offline"
+            elif any(c["caller"] in (me, target) or c["callee"] in (me, target) for c in self.calls.values()):
+                state = "busy"
+            else:
+                state = "ringing"
+                cid = uuid.uuid4().hex
+                call = {"call_id": cid, "caller": me, "callee": target, "media": media, "status": "ringing"}
+                self.calls[cid] = call
+        if state != "ringing":
+            self._log_instant_call(me, target, media, "no_answer" if state == "offline" else "busy")
+            conn.send({"type": "call_result", "status": state, "peer": target})
+            return
+        self.db.create_call(cid, me, target, media, "ringing")
+        # The caller hears "ringing" BEFORE the callee's phone rings, so an instant answer can never
+        # arrive ahead of it.
+        conn.send({"type": "call_result", **call})
+        if not self._send_to(target, {"type": "call_incoming", **call}):
+            self._finish_call(cid, "no_answer")
+            return
+        timer = threading.Timer(RING_SECONDS, self._timeout_call, args=(cid,))
+        timer.daemon = True
+        with self.lock:
+            if cid in self.calls:
+                self._call_timers[cid] = timer
+                timer.start()
+
+    def _timeout_call(self, cid):
+        with self.lock:
+            c = self.calls.get(cid)
+            if not c or c["status"] != "ringing":
+                return
+        self._finish_call(cid, "no_answer")
+
+    def _finish_call(self, cid, status):
+        """End a call exactly once: log it, stop its timer and tell both people."""
+        with self.lock:
+            call = self.calls.pop(cid, None)
+            timer = self._call_timers.pop(cid, None)
+        if timer is not None:
+            timer.cancel()
+        if not call:
+            return
+        self.db.finish_call(cid, status)
+        event = {"type": "call_ended", "call_id": cid, "status": status}
+        self._send_to(call["caller"], event)
+        self._send_to(call["callee"], event)
+
+    def _end_calls_of(self, username, status, with_user=None):
+        """Hang up every call of ``username`` (optionally only the one with ``with_user``)."""
+        with self.lock:
+            ids = [cid for cid, c in self.calls.items()
+                   if username in (c["caller"], c["callee"])
+                   and (with_user is None or with_user in (c["caller"], c["callee"]))]
+        for cid in ids:
+            with self.lock:
+                c = self.calls.get(cid)
+            if c is None:
+                continue
+            # a call nobody picked up is "cancelled"; one that was running is "completed" (or lost)
+            self._finish_call(cid, "cancelled" if c["status"] == "ringing" and status == "completed" else status)
+
+    def on_call_accept(self, session, msg):
+        cid = self._text(msg, "call_id", 64)
+        with self.lock:
+            c = self.calls.get(cid)
+            if not c or c["callee"] != session.username or c["status"] != "ringing":
+                return self._error(session.conn, "This call is no longer available.")
+            c["status"] = "active"
+            event = {"type": "call_accepted", "call_id": cid, "media": c["media"]}
+            caller = c["caller"]
+        self.db.mark_call_answered(cid)
+        self._send_to(caller, dict(event, peer=session.username))
+        session.conn.send(dict(event, peer=caller))
+
+    def on_call_decline(self, session, msg):
+        cid = self._text(msg, "call_id", 64)
+        with self.lock:
+            c = self.calls.get(cid)
+        if c and c["callee"] == session.username and c["status"] == "ringing":
+            self._finish_call(cid, "declined")
+
+    def on_call_end(self, session, msg):
+        cid = self._text(msg, "call_id", 64)
+        with self.lock:
+            c = self.calls.get(cid)
+            if not c or session.username not in (c["caller"], c["callee"]):
+                return
+            ringing = c["status"] == "ringing"
+            is_callee = c["callee"] == session.username
+        if not ringing:
+            self._finish_call(cid, "completed")
+        else:                                  # hanging up while it rings: the caller cancels, the callee declines
+            self._finish_call(cid, "declined" if is_callee else "cancelled")
+
+    def on_call_history(self, session, msg):
+        session.conn.send({"type": "call_history", "calls": self.db.calls_for_user(session.username)})
+
+    def _allow_media(self, session):
+        limit, window = MEDIA_RATE
+        now = time.monotonic()
+        while session.media_sent and now - session.media_sent[0] > window:
+            session.media_sent.popleft()
+        if len(session.media_sent) >= limit:
+            return False
+        session.media_sent.append(now)
+        return True
+
+    def on_call_media(self, session, msg):
+        cid = self._text(msg, "call_id", 64)
+        payload, kind, seq = msg.get("payload"), msg.get("kind"), msg.get("seq")
+        if kind not in ("audio", "video") or not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
+            return self._error(session.conn, "Invalid call media packet.")
+        if not isinstance(payload, str) or len(payload) > 78000:
+            return self._error(session.conn, "Invalid call media payload.")
+        with self.lock:
+            c = self.calls.get(cid)
+            if not c or c["status"] != "active" or session.username not in (c["caller"], c["callee"]):
+                return
+            peer = c["callee"] if session.username == c["caller"] else c["caller"]
+        if not self._allow_media(session):                      # a flood is dropped, never forwarded
+            return
+        # Opaque authenticated ciphertext only; the server never decodes media payloads.
+        self._send_to(peer, {"type": "call_media", "call_id": cid, "from": session.username,
+                             "kind": kind, "seq": seq, "payload": payload})
+
+    # ------------------------------------------------------------------ #
+    # typing indicator (relayed, never stored)
+    # ------------------------------------------------------------------ #
+    def on_typing(self, session, msg):
+        now = time.monotonic()
+        while session.typing_sent and now - session.typing_sent[0] > 10:
+            session.typing_sent.popleft()
+        if len(session.typing_sent) >= 20:                       # silently drop a flood of notices
+            return
+        session.typing_sent.append(now)
+        me = session.username
+        if "group_id" in msg:
+            gid = self._gid(msg)
+            group = self.db.get_group(gid) if gid is not None else None
+            if not group or me not in [m["username"] for m in group["members"]]:
+                return
+            for m in group["members"]:
+                if m["username"] != me:
+                    self._send_to(m["username"], {"type": "typing", "from": me, "group_id": gid})
+            return
+        target = P.normalize_username(msg.get("to"))
+        if target and self.db.are_friends(me, target):
+            self._send_to(target, {"type": "typing", "from": me})
 
 
 # --------------------------------------------------------------------------- #

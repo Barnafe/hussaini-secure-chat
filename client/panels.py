@@ -5,7 +5,7 @@ import webbrowser
 
 from client import images
 from client import theme as T
-from client.controller import clock, day_label, dm_key, group_key, list_time, local_dt
+from client.controller import clock, day_heading, dm_key, group_key, list_time, local_dt
 from client.widgets import HitCanvas, ListCanvas, MessageView, PillEntry, Toggle, _wheel_units, bind_wheel
 
 SIDEBAR_W = 330
@@ -213,8 +213,13 @@ class Sidebar(tk.Frame):
                 rows.append({"kind": "empty", "height": 110,
                              "text": "No groups yet.\nCreate one from your friends."})
         else:                                                      # calls
-            rows.append({"kind": "empty", "height": 220,
-                         "text": "Voice and video calls\nare not available yet."})
+            history = [r for r in self.ctrl.call_rows()
+                       if not query or query in r["name"].lower() or query in r["username"]]
+            if not history:
+                rows.append({"kind": "empty", "height": 180,
+                             "text": "Your calls will appear here.\nStart a call from a friend's chat."})
+            for r in history:
+                rows.append(dict(r, kind="call", height=72))
         self.list.set_rows(rows, self.ctrl.current)
 
     def _select(self, row):
@@ -236,6 +241,8 @@ class Sidebar(tk.Frame):
             self.ctrl.send_friend_request(row["username"])
         elif name == "manage":
             main.manage_group(row["group"]["group_id"])
+        elif name == "call_back":
+            main.place_call(row.get("username", ""), row.get("media", "audio"))
 
     # ---- row drawing --------------------------------------------------------- #
     def _render(self, c, row, y, w, hover, selected, regions):
@@ -265,6 +272,22 @@ class Sidebar(tk.Frame):
         mid = y + h // 2
         if kind == "chat":
             self._render_chat(c, row, y, w, selected, bg, mid)
+        elif kind == "call":
+            missed = row["missed"]
+            colour = T.RED if missed else T.TEXT
+            arrow = "↗" if row["outgoing"] else "↙"
+            sub = f"{arrow} {row['outcome']} · {'Video' if row['media'] == 'video' else 'Voice'}"
+            if row["duration_text"]:
+                sub += f" · {row['duration_text']}"
+            c.create_image(22, mid, image=user_avatar(self.ctrl, row["username"], 44, bg), anchor="w")
+            c.create_text(78, mid - 12, text=T.ellipsize(T.font(15, "semibold"), row["name"], w - 170), anchor="w",
+                          fill=colour, font=T.font(15, "semibold"))
+            c.create_text(78, mid + 8, text=T.ellipsize(T.font(12), sub, w - 170), anchor="w",
+                          fill=T.RED if missed else T.MUTED, font=T.font(12))
+            c.create_text(78, mid + 25, text=row["when"], anchor="w", fill=T.DIM, font=T.font(11))
+            icon = "video_fill" if row["media"] == "video" else "phone_fill"
+            c.create_image(w - 44, mid, image=T.icon(icon, 24, T.BLUE_HI, 1.8))
+            regions.append((w - 80, w, "call_back"))
         elif kind == "friend":
             c.create_image(22, mid, image=user_avatar(self.ctrl, row["username"], 44, bg, row["online"]), anchor="w")
             c.create_text(78, mid - 10, text=T.ellipsize(T.font(16, "semibold"), row["name"], w - 110), anchor="w",
@@ -362,6 +385,8 @@ class ChatPane(tk.Frame):
         self.ph = tk.Label(self.bar, text="Type a message...", font=T.font(16), bg=T.FIELD, fg=T.DIM, anchor="w",
                            bd=0, cursor="xterm")
         self.ph.bind("<Button-1>", lambda _e: self.entry.focus_set())
+        self.entry.bind("<KeyRelease>", self._typed)
+        self.status_text = ""                       # the line under the name in the header (online / typing ...)
         self.var.trace_add("write", lambda *_: self.bar.itemconfigure("ph", state="hidden" if self.var.get() else "normal"))
         self._wall = None
 
@@ -380,17 +405,28 @@ class ChatPane(tk.Frame):
             c.create_image(68, 40, image=user_avatar(ctrl, u, 52, T.HEADER, online), anchor="w")
             title = ctrl.friends.get(u, {}).get("fullname", u)
             status, color = ("Online", "#6ea8ff") if online else ("Offline", T.MUTED)
+            state = ctrl.verification_state(u)
+            if state == "verified":
+                status += "   \u2714 Verified"
+            elif state == "changed":
+                status, color = "\u26a0 Safety number changed - verify again", T.RED
         else:
             g = ctrl.groups.get(int(key[6:]))
             c.create_image(68, 40, image=group_photo(52, T.HEADER), anchor="w")
             title = g["name"] if g else ""
             status, color = (f"{len(g['members'])} members" if g else ""), T.MUTED
+        names = ctrl.typing_names(key)
+        if names:
+            status = (f"{names[0].split(' ')[0]} is typing..." if len(names) == 1
+                      else "Several people are typing...")
+            color = T.BLUE_HI
+        self.status_text = status
         c.create_text(136, 28, text=T.ellipsize(T.font(19, "semibold"), title, w - 330), anchor="w", fill=T.TEXT,
                       font=T.font(19, "semibold"))
         c.create_text(136, 54, text=status, anchor="w", fill=color, font=T.font(15))
         c.hit(60, 8, w - 150, 72, self.main.toggle_info)
-        for name, x, size, cb in (("phone_fill", w - 124, 24, self.main.call_unavailable),
-                                  ("video_fill", w - 78, 28, self.main.call_unavailable)):
+        for name, x, size, cb in (("phone_fill", w - 124, 24, self.main.call_audio),
+                                  ("video_fill", w - 78, 28, self.main.call_video)):
             c.create_image(x, 40, image=T.icon(name, size, T.BLUE_HI, 1.6))
             c.hit(x - 20, 18, x + 20, 62, cb)
         c.create_image(w - 32, 40, image=T.icon("dots_v", 24, T.TEXT2))
@@ -437,12 +473,13 @@ class ChatPane(tk.Frame):
             items.append({"type": "empty", "text": "Your conversation starts here.\nSend a message to say hello."})
         is_group = key.startswith("group:")
         for m in msgs:
-            label = day_label(m["timestamp"])
+            label = day_heading(m["timestamp"])
             if label and label != last_day:
                 items.append({"type": "day", "text": label})
                 last_day = label
             mine = m["from"] == me
-            item = {"type": "msg", "mine": mine, "text": m["text"], "ok": m["ok"], "time": clock(m["timestamp"])}
+            item = {"type": "msg", "mine": mine, "text": m["text"], "ok": m["ok"], "time": clock(m["timestamp"]),
+                    "delivered": bool(m.get("delivered"))}
             if not mine:
                 item["avatar"] = user_avatar(ctrl, m["from"], 38, T.BG)
                 if is_group:
@@ -459,6 +496,14 @@ class ChatPane(tk.Frame):
     def send(self):
         if self.ctrl.send_text(self.entry.get()):
             self.entry.delete(0, tk.END)
+
+    def _typed(self, event=None):
+        """Every key press tells the controller, which tells the other side at most every 3 seconds."""
+        if event is not None and event.keysym in ("Return", "KP_Enter", "Shift_L", "Shift_R", "Control_L",
+                                                  "Control_R", "Alt_L", "Alt_R", "Tab"):
+            return
+        if self.entry.get().strip():
+            self.ctrl.notify_typing()
 
 
 def ctrl_key(ctrl):
@@ -527,7 +572,7 @@ class InfoPane(HitCanvas):
                 y += 12 + T.font(15).metrics("linespace") * (1 + T.font(15).measure(bio) // (w - 48))
             y += 10
         # round action buttons
-        acts = [("Call", "phone_fill", main.call_unavailable), ("Video", "video_fill", main.call_unavailable),
+        acts = [("Call", "phone_fill", main.call_audio), ("Video", "video_fill", main.call_video),
                 ("Info", "info", main.show_info_dialog), ("More", "dots_h", main.show_chat_menu)]
         for i, (label, icon, cb) in enumerate(acts):
             x = int(w * (2 * i + 1) / 8)
@@ -590,7 +635,8 @@ class InfoPane(HitCanvas):
                 ("trash", "Clear Chat", T.TEXT, main.clear_chat, False),
                 *(([("users", "Manage Group", T.TEXT, main.manage_current_group, True),
                     ("logout", "Leave Group", T.RED, main.leave_current_group, False)]) if is_group else
-                  [("ban", "Block Contact", T.RED, main.block_current, False)])):
+                  [("lock", "Verify Security", T.TEXT, main.open_verify, True),
+                   ("ban", "Block Contact", T.RED, main.block_current, False)])):
             c.create_image(34, y + 25, image=T.icon(icon, 22, color if color == T.RED else T.TEXT2, 1.8))
             c.create_text(70, y + 25, text=label, anchor="w", fill=color, font=T.font(15))
             if chevron:

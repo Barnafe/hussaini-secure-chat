@@ -81,6 +81,17 @@ SCHEMA = [
         encrypted_message TEXT NOT NULL,
         timestamp DATETIME NOT NULL)""",
     "CREATE INDEX IF NOT EXISTS idx_group_messages_group ON group_messages (group_id, message_id)",
+    """CREATE TABLE IF NOT EXISTS call_history (
+        call_id TEXT PRIMARY KEY,
+        caller TEXT NOT NULL,
+        callee TEXT NOT NULL,
+        media TEXT NOT NULL,
+        status TEXT NOT NULL,
+        started TEXT NOT NULL,
+        answered TEXT,
+        ended TEXT,
+        duration INTEGER NOT NULL DEFAULT 0)""",
+    "CREATE INDEX IF NOT EXISTS idx_call_history_users ON call_history (caller, callee, started)",
 ]
 
 
@@ -150,6 +161,9 @@ class Database:
             for name in ("bio", "avatar", "avatar_ver"):   # profile fields (added in v6)
                 if name not in columns:
                     self._q(conn, f"ALTER TABLE users ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+            call_columns = [r["name"] for r in self._q(conn, "PRAGMA table_info(call_history)").fetchall()]
+            if "answered" not in call_columns:             # call log made by the first calling build
+                self._q(conn, "ALTER TABLE call_history ADD COLUMN answered TEXT")
 
     # ------------------------------------------------------------------ #
     # users
@@ -245,6 +259,47 @@ class Database:
             self._q(conn, "INSERT INTO friendships (user_a, user_b, created) VALUES (?, ?, ?) "
                           "ON CONFLICT (user_a, user_b) DO NOTHING", (x, y, utcnow()))
 
+    # ------------------------------------------------------------------ #
+    # call log
+    # ------------------------------------------------------------------ #
+    def create_call(self, call_id, caller, callee, media, status="ringing"):
+        """Log a call. Anything but "ringing" is already over (busy / offline): it is closed at once."""
+        now = utcnow()
+        with self._tx() as conn:
+            self._q(conn, "INSERT INTO call_history(call_id,caller,callee,media,status,started,ended,duration) "
+                          "VALUES(?,?,?,?,?,?,?,0)",
+                    (call_id, caller, callee, media, status, now, None if status == "ringing" else now))
+
+    def mark_call_answered(self, call_id):
+        with self._tx() as conn:
+            self._q(conn, "UPDATE call_history SET answered=? WHERE call_id=? AND ended IS NULL AND answered IS NULL",
+                    (utcnow(), call_id))
+
+    _DURATION_SQL = ("CASE WHEN answered IS NULL THEN 0 ELSE "
+                     "MAX(0, CAST(strftime('%s', ?) AS INTEGER) - CAST(strftime('%s', answered) AS INTEGER)) END")
+
+    def finish_call(self, call_id, status):
+        """Close a call. The duration is the talk time (answer -> end); ringing time never counts."""
+        with self._tx() as conn:
+            now = utcnow()
+            self._q(conn, f"UPDATE call_history SET status=?, ended=?, duration={self._DURATION_SQL} "
+                          "WHERE call_id=? AND ended IS NULL", (status, now, now, call_id))
+
+    def close_stale_calls(self):
+        """After a crash or restart no call can still be going on: close every call left open."""
+        with self._tx() as conn:
+            now = utcnow()
+            self._q(conn, f"UPDATE call_history SET ended=?, duration={self._DURATION_SQL}, "
+                          "status=CASE WHEN answered IS NULL THEN 'no_answer' ELSE 'connection_lost' END "
+                          "WHERE ended IS NULL", (now, now))
+
+    def calls_for_user(self, username, limit=100):
+        with self._tx() as conn:
+            return self._all(conn, "SELECT call_id,caller,callee,media,status,started,answered,ended,duration "
+                                   "FROM call_history WHERE caller=? OR callee=? "
+                                   "ORDER BY started DESC, rowid DESC LIMIT ?",
+                             (username, username, max(1, min(int(limit), 200))))
+
     def are_friends(self, a, b):
         x, y = self._pair(a, b)
         with self._tx() as conn:
@@ -255,6 +310,65 @@ class Database:
         x, y = self._pair(a, b)
         with self._tx() as conn:
             self._q(conn, "DELETE FROM friendships WHERE user_a = ? AND user_b = ?", (x, y))
+
+    def update_password(self, username, pw_hash):
+        with self._tx() as conn:
+            self._q(conn, "UPDATE users SET password = ? WHERE username = ?", (pw_hash, username))
+
+    def last_direct_messages(self, user):
+        """{peer: newest message row between `user` and that peer} - used for chat-list previews."""
+        with self._tx() as conn:
+            rows = self._all(
+                conn,
+                "SELECT m.* FROM messages m JOIN ("
+                "SELECT CASE WHEN sender = ? THEN receiver ELSE sender END AS peer, MAX(message_id) AS mid "
+                "FROM messages WHERE sender = ? OR receiver = ? GROUP BY peer) x ON m.message_id = x.mid",
+                (user, user, user))
+        out = {}
+        for r in rows:
+            r["timestamp"] = _ts(r["timestamp"])
+            out[r["receiver"] if r["sender"] == user else r["sender"]] = r
+        return out
+
+    def last_group_messages(self, user):
+        """{group_id: newest message this member is allowed to see}."""
+        with self._tx() as conn:
+            rows = self._all(
+                conn,
+                "SELECT gm2.* FROM group_messages gm2 JOIN group_members m "
+                "ON m.group_id = gm2.group_id AND m.username = ? "
+                "WHERE gm2.message_id = (SELECT MAX(message_id) FROM group_messages g3 "
+                "WHERE g3.group_id = gm2.group_id) AND gm2.message_id > m.first_visible_id", (user,))
+        for r in rows:
+            r["timestamp"] = _ts(r["timestamp"])
+        return {r["group_id"]: r for r in rows}
+
+    def rename_group(self, group_id, name):
+        with self._tx() as conn:
+            self._q(conn, "UPDATE chat_groups SET name = ? WHERE group_id = ?", (name, group_id))
+
+    def user_summaries(self):
+        """One row per account for the --list-users admin command."""
+        with self._tx() as conn:
+            return self._all(
+                conn,
+                "SELECT u.username, u.fullname, u.date_created, "
+                "(SELECT COUNT(*) FROM friendships f WHERE f.user_a = u.username OR f.user_b = u.username) AS friends, "
+                "(SELECT COUNT(*) FROM messages m WHERE m.sender = u.username) AS messages_sent "
+                "FROM users u ORDER BY u.user_id")
+
+    def backup_to(self, target_path):
+        """Copy the whole database to `target_path` (safe while the server is running)."""
+        folder = os.path.dirname(os.path.abspath(target_path))
+        os.makedirs(folder, exist_ok=True)
+        src = sqlite3.connect(self._path, timeout=15)
+        dst = sqlite3.connect(target_path)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+            src.close()
+        return target_path
 
     def search_users(self, exclude, query="", limit=100):
         """Users other than `exclude` whose username or full name contains `query` (case-insensitive).
@@ -411,6 +525,23 @@ class Database:
             self._q(conn, "UPDATE group_members SET last_delivered_id = ? "
                           "WHERE group_id = ? AND username = ? AND last_delivered_id < ?",
                     (message_id, group_id, user, message_id))
+
+    def set_group_cursor_if_caught_up(self, group_id, user, message_id):
+        """Live delivery: move the delivered marker to ``message_id`` ONLY if nothing older is still undelivered.
+
+        The marker is a single high-water mark per member. If a live message simply overwrote it while older
+        messages were still queued for that member (for example one arriving while they were logging in),
+        those older messages would never be delivered. Left behind, they are sent at the next login (clients
+        ignore a message id they already have).
+        """
+        with self._tx() as conn:
+            self._q(conn,
+                    "UPDATE group_members SET last_delivered_id = ? "
+                    "WHERE group_id = ? AND username = ? AND last_delivered_id < ? "
+                    "AND NOT EXISTS (SELECT 1 FROM group_messages g WHERE g.group_id = group_members.group_id "
+                    "AND g.message_id > group_members.last_delivered_id "
+                    "AND g.message_id > group_members.first_visible_id AND g.message_id < ?)",
+                    (message_id, group_id, user, message_id, message_id))
 
     def group_history(self, group_id, user, limit=100):
         with self._tx() as conn:

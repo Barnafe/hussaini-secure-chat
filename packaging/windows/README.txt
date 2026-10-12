@@ -11,6 +11,8 @@ WHAT IS IN THIS FOLDER
   HussainiChat.exe         the chat program people use
   start-demo.bat           one click: starts the server and two chat windows
   show-database.bat        shows what the server stores (hashes + ciphertext)
+  server-tools.bat         menu for the server owner: list accounts, back up the
+                           database, reset a forgotten password
   settings.txt             port number, database file, default server address
   PRESENTATION_GUIDE.txt   step-by-step script for the project defence
   data\                    the server stores accounts and messages here (chat.db)

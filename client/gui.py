@@ -5,19 +5,25 @@ shapes, gradients, avatars) comes from client/theme.py, images.py, widgets.py an
 """
 import hashlib
 import base64
+import zlib
 import tkinter as tk
+import time
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-from client import images
+from client import images, notify
 from client import theme as T
 from client.controller import ChatController, dm_key, group_key
+from client.call_ui import CallManager
+from client.prefs import Prefs
+from client.resources import resource_path
 from client.panels import INFO_W, SIDEBAR_W, ChatPane, InfoPane, Sidebar, group_photo, user_avatar
-from client.widgets import PillButton, PillEntry, ScrollFrame, Toast
+from client.widgets import PillButton, PillEntry, ScrollFrame, Toast, Toggle
 from shared import protocol as P
 from shared import settings as app_settings
+from shared import version
 
-APP_TITLE = "Hussaini Secure Chat"
+APP_TITLE = version.APP_NAME
 MONO = ("Consolas", 17, "bold")
 IMAGE_TYPES = [("Pictures", "*.png *.jpg *.jpeg *.bmp *.gif *.webp"), ("All files", "*.*")]
 EMOJIS = ("\U0001F600 \U0001F604 \U0001F60A \U0001F609 \U0001F60D \U0001F618 \U0001F60E \U0001F914 \U0001F62E \U0001F622 "
@@ -60,6 +66,8 @@ class LoginFrame(tk.Canvas):
         self.new_passphrase = None           # the passphrase created by the last registration
         self._bg_size = None
         self.bind("<Configure>", self._paint_bg)
+        PillButton(self, "About", app.show_about, style="secondary", width=90, height=38, font_px=13, bg=T.BG
+                   ).place(relx=1.0, rely=1.0, anchor="se", x=-18, y=-18)
 
         card = tk.Frame(self, bg=T.CARD, highlightthickness=1, highlightbackground=T.LINE)
         self.card = card
@@ -378,6 +386,112 @@ class AddFriendDialog(_Dialog):
             self.msg.configure(text=f"Sending a request to @{user}...", fg=T.GREEN)
 
 
+class AboutDialog(_Dialog):
+    """Version, credits and the technology behind the program."""
+
+    def __init__(self, parent):
+        super().__init__(parent, "About " + version.APP_NAME, 460, 500)
+        self._image = None
+        try:
+            self._image = tk.PhotoImage(file=resource_path("assets", "icon.png")).subsample(2, 2)
+            tk.Label(self, image=self._image, bg=T.CARD).pack(pady=(20, 4))
+        except tk.TclError:
+            pass
+        label(self, version.APP_NAME, 20, "bold").pack()
+        label(self, f"Version {version.VERSION}", 14, "semibold", T.BLUE_HI).pack(pady=(2, 10))
+        label(self, version.DESCRIPTION, 13, fg=T.TEXT2, wraplength=400, justify="center").pack(padx=24)
+        label(self, version.TECH, 12, fg=T.MUTED, wraplength=400, justify="center").pack(padx=24, pady=(8, 14))
+        lines = [f"Developed by {version.AUTHOR}", version.INSTITUTION]
+        if version.SUPERVISOR:
+            lines.append(f"Supervisor: {version.SUPERVISOR}")
+        for line in lines:
+            label(self, line, 14).pack()
+        label(self, "Messages are encrypted on your computer. The server only ever stores unreadable ciphertext.",
+              12, fg=T.MUTED, wraplength=400, justify="center").pack(padx=24, pady=(14, 8))
+        PillButton(self, "Close", self.destroy, style="secondary", width=400, height=44, font_px=14).pack(pady=(6, 16))
+
+
+class ChangePasswordDialog(_Dialog):
+    """Change the account password (asks for the current one first). The passphrase is not affected."""
+
+    def __init__(self, parent, ctrl):
+        super().__init__(parent, "Change password", 420, 520)
+        self.ctrl = ctrl
+        self.vars = {k: tk.StringVar() for k in ("current", "new", "confirm")}
+        label(self, "Change password", 18, "bold").pack(anchor="w", padx=24, pady=(20, 2))
+        label(self, "Your passphrase stays the same, so your old chats remain readable.", 12, fg=T.MUTED,
+              wraplength=370, justify="left").pack(anchor="w", padx=24, pady=(0, 8))
+        self.fields = []
+        for key, text in (("current", "Current password"), ("new", "New password (8+ characters)"),
+                          ("confirm", "Confirm new password")):
+            label(self, text, 12, "semibold", T.MUTED).pack(anchor="w", padx=24, pady=(6, 2))
+            f = PillEntry(self, textvariable=self.vars[key], show="\u2022", icon="lock", width=370, height=44)
+            f.pack(padx=24)
+            f.entry.bind("<Return>", lambda _e: self.submit())
+            self.fields.append(f)
+        self.msg = label(self, "", 12, fg=T.MUTED, wraplength=370, justify="left")
+        self.msg.pack(anchor="w", padx=24, pady=(10, 0))
+        self.btn = PillButton(self, "Change password", self.submit, width=370, height=46)
+        self.btn.pack(padx=24, pady=14)
+        self.fields[0].focus_set()
+
+    def submit(self):
+        if self.btn.cget("text") == "Close":
+            self.destroy()
+            return
+        self.msg.configure(text="Working...", fg=T.MUTED)
+        self.ctrl.change_password(self.vars["current"].get(), self.vars["new"].get(), self.vars["confirm"].get())
+
+    def result(self, ev):
+        ok = bool(ev.get("ok"))
+        self.msg.configure(text=ev.get("message", ""), fg=T.GREEN if ok else T.RED)
+        if ok:
+            for f in self.fields:
+                f.entry.configure(state="disabled")
+            self.btn.configure(text="Close")
+
+
+class VerifyDialog(_Dialog):
+    """Safety number: two friends compare it to be sure nobody swapped their encryption keys."""
+
+    STATES = {"verified": ("Verified", T.GREEN),
+              "unverified": ("Not verified yet", T.MUTED),
+              "changed": ("WARNING: the number is different from the one you verified before!", T.RED),
+              "unknown": ("No key available for this person.", T.RED)}
+
+    def __init__(self, parent, ctrl, peer):
+        super().__init__(parent, "Verify security", 460, 420)
+        self.ctrl, self.peer = ctrl, peer
+        label(self, f"Verify your chat with {ctrl.name_of(peer)}", 18, "bold", wraplength=410, justify="left"
+              ).pack(anchor="w", padx=24, pady=(20, 4))
+        label(self, "Compare the number below with the one on their screen (meet, or call them). "
+                    "If both are identical, nobody is intercepting your messages.", 12, fg=T.MUTED,
+              wraplength=410, justify="left").pack(anchor="w", padx=24)
+        number = ctrl.safety_number_for(peer) or "-"
+        groups = number.split()
+        shown = "\n".join(" ".join(groups[i:i + 3]) for i in range(0, len(groups), 3)) if len(groups) == 6 else number
+        tk.Label(self, text=shown, font=("Consolas", 20, "bold"), fg=T.BLUE_HI, bg=T.FIELD, pady=18
+                 ).pack(fill="x", padx=24, pady=14)
+        self.state = label(self, "", 14, "semibold")
+        self.state.pack(anchor="w", padx=24)
+        self.btn = PillButton(self, "Mark as verified", self.mark, width=410, height=46)
+        self.btn.pack(padx=24, pady=(14, 6))
+        PillButton(self, "Close", self.destroy, style="secondary", width=410, height=44, font_px=14).pack(
+            padx=24, pady=(0, 14))
+        self.refresh()
+
+    def refresh(self):
+        state = self.ctrl.verification_state(self.peer)
+        text, color = self.STATES[state]
+        self.state.configure(text=text, fg=color)
+        self.btn.configure(state="disabled" if state in ("verified", "unknown") else "normal",
+                           text="Mark as verified" if state != "changed" else "I checked - mark as verified again")
+
+    def mark(self):
+        self.ctrl.mark_verified(self.peer)
+        self.refresh()
+
+
 class CreateGroupDialog(_Dialog):
     def __init__(self, parent, ctrl):
         super().__init__(parent, "New group", 380, 500)
@@ -411,7 +525,7 @@ class CreateGroupDialog(_Dialog):
 
 class ManageGroupDialog(_Dialog):
     def __init__(self, parent, ctrl, gid):
-        super().__init__(parent, "Manage group", 400, 560)
+        super().__init__(parent, "Manage group", 400, 660)
         self.ctrl, self.gid = ctrl, gid
         self.title_var = tk.StringVar()
         tk.Label(self, textvariable=self.title_var, font=T.font(19, "bold"), fg=T.TEXT, bg=T.CARD).pack(
@@ -421,6 +535,14 @@ class ManageGroupDialog(_Dialog):
         self.lb.pack(fill="both", expand=True, padx=24, pady=(4, 10))
         self.admin_box = tk.Frame(self, bg=T.CARD)
         self.admin_box.pack(fill="x", padx=24)
+        label(self.admin_box, "Group name", 13, fg=T.MUTED).pack(anchor="w")
+        name_row = tk.Frame(self.admin_box, bg=T.CARD)
+        name_row.pack(fill="x", pady=(4, 8))
+        self.rename_var = tk.StringVar()
+        self._last_name = ""
+        PillEntry(name_row, textvariable=self.rename_var, width=220, height=40, radius=14).pack(
+            side="left", fill="x", expand=True)
+        PillButton(name_row, "Rename", self.rename, width=90, height=40, font_px=14).pack(side="left", padx=(8, 0))
         label(self.admin_box, "Add a friend", 13, fg=T.MUTED).pack(anchor="w")
         row = tk.Frame(self.admin_box, bg=T.CARD)
         row.pack(fill="x", pady=(4, 8))
@@ -429,6 +551,8 @@ class ManageGroupDialog(_Dialog):
         PillButton(row, "Add", self.add, width=80, height=36, font_px=14).pack(side="left", padx=(8, 0))
         PillButton(self.admin_box, "Remove selected member", self.remove, style="secondary", height=42,
                    font_px=14).pack(fill="x")
+        PillButton(self.admin_box, "Make selected member the admin", self.make_admin, style="secondary", height=42,
+                   font_px=14).pack(fill="x", pady=(6, 0))
         PillButton(self, "Leave group", self.leave, style="danger", height=44, font_px=14).pack(
             fill="x", padx=24, pady=16)
         self.members, self.candidates = [], []
@@ -441,6 +565,9 @@ class ManageGroupDialog(_Dialog):
             return
         me = self.ctrl.me["username"]
         self.title_var.set(g["name"])
+        if self.rename_var.get() in ("", self._last_name):          # do not overwrite what the admin is typing
+            self.rename_var.set(g["name"])
+        self._last_name = g["name"]
         self.members = [m["username"] for m in g["members"]]
         self.lb.delete(0, tk.END)
         for m in g["members"]:
@@ -464,6 +591,22 @@ class ManageGroupDialog(_Dialog):
         sel = self.lb.curselection()
         if sel:
             self.ctrl.group_remove(self.gid, self.members[sel[0]])
+
+    def rename(self):
+        name = self.rename_var.get().strip()
+        if name:
+            self.ctrl.group_rename(self.gid, name)
+
+    def make_admin(self):
+        sel = self.lb.curselection()
+        if not sel:
+            return
+        user = self.members[sel[0]]
+        if user == self.ctrl.me["username"]:
+            return
+        if messagebox.askyesno("Hand over admin", f"Make {self.ctrl.name_of(user)} the admin of this group?\n"
+                               "You will no longer be able to add or remove members.", parent=self):
+            self.ctrl.group_transfer(self.gid, user)
 
     def leave(self):
         if messagebox.askyesno("Leave group", "Leave this group?", parent=self):
@@ -605,6 +748,27 @@ class SettingsPage(tk.Frame):
         self.pw_msg = tk.Label(card, text="", font=T.font(13), bg=T.CARD, fg=T.GREEN, anchor="w")
         self.pw_msg.pack(anchor="w", pady=(8, 0))
 
+        # ---- calling devices (saved locally on this computer)
+        card = self._card(body)
+        tk.Label(card, text="Calling devices", font=T.font(17, "semibold"), fg=T.TEXT, bg=T.CARD).pack(anchor="w", pady=(0, 4))
+        tk.Label(card, text="Choose the microphone, speaker and camera used for calls. These choices stay on this device.",
+                 font=T.font(12), fg=T.MUTED, bg=T.CARD, wraplength=560, justify="left").pack(anchor="w", pady=(0, 12))
+        self.audio_input_var = tk.StringVar(value="Default")
+        self.audio_output_var = tk.StringVar(value="Default")
+        self.camera_index_var = tk.StringVar(value="0")
+        self.audio_input_options = {"Default": None}
+        self.audio_output_options = {"Default": None}
+        self.device_combos = [
+            self._device_row(card, "Microphone", self.audio_input_var, list(self.audio_input_options)),
+            self._device_row(card, "Speaker / headphones", self.audio_output_var, list(self.audio_output_options)),
+            self._device_row(card, "Camera index", self.camera_index_var, [str(i) for i in range(5)])]
+        device_buttons = tk.Frame(card, bg=T.CARD); device_buttons.pack(anchor="w", pady=(8, 0))
+        PillButton(device_buttons, "Refresh devices", self.refresh_call_devices, style="secondary", width=160, height=40).pack(side="left")
+        PillButton(device_buttons, "Save devices", self.save_call_devices, width=150, height=40).pack(side="left", padx=(8, 0))
+        self.devices_msg = tk.Label(card, text="", font=T.font(12), bg=T.CARD, fg=T.MUTED, anchor="w", wraplength=560, justify="left")
+        self.devices_msg.pack(anchor="w", pady=(8, 0))
+        self.refresh_call_devices(initial=True)
+
         # ---- account
         card = self._card(body)
         tk.Label(card, text="Account", font=T.font(17, "semibold"), fg=T.TEXT, bg=T.CARD).pack(anchor="w", pady=(0, 8))
@@ -612,6 +776,13 @@ class SettingsPage(tk.Frame):
         self.server_label.pack(anchor="w")
         tk.Label(card, text="Messages are encrypted on this computer with AES-256-GCM before they are sent.",
                  font=T.font(13), fg=T.MUTED, bg=T.CARD, wraplength=440, justify="left").pack(anchor="w", pady=(6, 14))
+        row = tk.Frame(card, bg=T.CARD)
+        row.pack(fill="x", pady=(0, 14))
+        Toggle(row, main.app.sound_var.get(), lambda v: main.app.sound_var.set(v), bg=T.CARD).pack(side="left")
+        tk.Label(row, text="Play a sound for new messages", font=T.font(14), fg=T.TEXT, bg=T.CARD).pack(
+            side="left", padx=12)
+        PillButton(card, "About this program", main.app.show_about, style="secondary", width=200, height=46
+                   ).pack(anchor="w", pady=(0, 10))
         PillButton(card, "Sign out", main.app.logout, style="danger", width=200, height=46, icon="logout").pack(anchor="w")
         self.refresh()
 
@@ -629,6 +800,65 @@ class SettingsPage(tk.Frame):
         f = PillEntry(parent, textvariable=var, show=show, width=440, height=46, radius=14, icon=icon)
         f.pack(anchor="w", pady=(0, 12))
         return f
+
+    def _device_row(self, parent, title, variable, values):
+        row = tk.Frame(parent, bg=T.CARD); row.pack(fill="x", pady=(0, 9))
+        tk.Label(row, text=title, font=T.font(13, "semibold"), fg=T.MUTED, bg=T.CARD, width=22, anchor="w").pack(side="left")
+        combo = ttk.Combobox(row, textvariable=variable, values=values, state="readonly", width=38)
+        combo.pack(side="left", fill="x", expand=True)
+        return combo
+
+    def refresh_call_devices(self, initial=False):
+        inputs, outputs = {"Default": None}, {"Default": None}
+        camera_choices = [str(i) for i in range(5)]
+        try:
+            import sounddevice as sd
+            try:                                         # Windows lists every device once per audio system: show one
+                usable = set(sd.query_hostapis(sd.default.hostapi)["devices"])
+            except Exception:
+                usable = None
+            for index, dev in enumerate(sd.query_devices()):
+                if usable is not None and index not in usable:
+                    continue
+                name = f"{index}: {dev['name']}"
+                if int(dev.get("max_input_channels", 0)) > 0:
+                    inputs[name] = index
+                if int(dev.get("max_output_channels", 0)) > 0:
+                    outputs[name] = index
+            note = ("Audio devices detected. Camera choices use indexes 0-4; an unavailable camera "
+                    "shows an error during a video call.")
+        except Exception:
+            note = ("Audio device listing needs the optional calling packages. Install requirements-media.txt, "
+                    "then refresh. Default devices remain available.")
+        self.audio_input_options, self.audio_output_options = inputs, outputs
+        for combo, values in zip(self.device_combos, (list(inputs), list(outputs), camera_choices)):
+            combo.configure(values=values)
+        if not initial:                                  # a chosen device that was unplugged falls back to Default
+            if self.audio_input_var.get() not in inputs:
+                self.audio_input_var.set("Default")
+            if self.audio_output_var.get() not in outputs:
+                self.audio_output_var.set("Default")
+        if initial:
+            try:
+                username = self.ctrl.me["username"] if self.ctrl.me else ""
+                saved = self.main.app.prefs.call_devices(username) if username else {}
+                in_idx, out_idx = saved.get("audio_input"), saved.get("audio_output")
+                self.audio_input_var.set(next((k for k,v in inputs.items() if v == in_idx), "Default"))
+                self.audio_output_var.set(next((k for k,v in outputs.items() if v == out_idx), "Default"))
+                self.camera_index_var.set(str(saved.get("camera_index", 0)))
+            except Exception: pass
+        self.devices_msg.configure(text=note, fg=T.MUTED)
+
+    def save_call_devices(self):
+        try:
+            username = self.ctrl.me["username"]
+            self.main.app.prefs.set_call_devices(username,
+                self.audio_input_options.get(self.audio_input_var.get()),
+                self.audio_output_options.get(self.audio_output_var.get()),
+                self.camera_index_var.get())
+            self.devices_msg.configure(text="Calling devices saved on this computer.", fg=T.GREEN)
+        except Exception as exc:
+            self.devices_msg.configure(text=f"Could not save calling devices: {exc}", fg=T.RED)
 
     def _count(self):
         n = len(self.bio_var.get())
@@ -758,6 +988,11 @@ class MainFrame(tk.Frame):
         self.sidebar.refresh()
         self.info.draw()
 
+    def open_verify(self):
+        key = self.ctrl.current
+        if key and key.startswith("dm:"):
+            self.app.verify_dialog = VerifyDialog(self, self.ctrl, key[3:])
+
     def on_conversation(self, key):
         self.sidebar.refresh_list()
         if key == self.ctrl.current:
@@ -776,6 +1011,8 @@ class MainFrame(tk.Frame):
         self.sidebar.search_var.set("")
         if view == "settings":
             self.settings.load_fields()
+        if view == "calls":
+            self.ctrl.request_call_history()
         self.sidebar.refresh()
         self._layout()
 
@@ -796,8 +1033,22 @@ class MainFrame(tk.Frame):
         self._layout()
 
     # ---- actions used by the panels ---------------------------------------------- #
-    def call_unavailable(self):
-        self.toast("Voice and video calls are not available yet.")
+    def call_audio(self):
+        self.call_current_chat("audio")
+
+    def call_video(self):
+        self.call_current_chat("video")
+
+    def call_current_chat(self, media):
+        key = self.ctrl.current or ""
+        if not key.startswith("dm:"):
+            self.toast("Open a friend's chat before calling.", bad=True)
+            return
+        self.place_call(key[3:], media)
+
+    def place_call(self, peer, media="audio"):
+        """Ring a friend. Refusals (not a friend, offline, key changed, already in a call) are shown as toasts."""
+        self.ctrl.start_call(peer, media)
 
     def attach_unavailable(self):
         self.toast("Sending photos and files is not available yet.")
@@ -876,6 +1127,7 @@ class MainFrame(tk.Frame):
             menu.add_command(label="Manage group", command=self.manage_current_group)
             menu.add_command(label="Leave group", command=self.leave_current_group)
         else:
+            menu.add_command(label="Verify security", command=self.open_verify)
             menu.add_command(label="Block contact", command=self.block_current)
         try:
             menu.tk_popup(self.winfo_pointerx(), self.winfo_pointery())
@@ -887,6 +1139,8 @@ class MainFrame(tk.Frame):
                        bd=0, font=T.font(14))
         menu.add_command(label="My profile", command=lambda: self.set_view("settings"))
         menu.add_command(label="Add friend", command=self.add_friend)
+        menu.add_command(label="Change password", command=self.app.show_change_password)
+        menu.add_command(label="About", command=self.app.show_about)
         menu.add_separator()
         menu.add_command(label="Sign out", command=self.app.logout)
         try:
@@ -920,6 +1174,8 @@ class MainFrame(tk.Frame):
 # --------------------------------------------------------------------------- #
 # Application window
 # --------------------------------------------------------------------------- #
+
+
 class App(tk.Tk):
     def __init__(self, controller=None):
         super().__init__()
@@ -931,14 +1187,61 @@ class App(tk.Tk):
         self.configure(bg=T.BG)
         self._setup_theme()
         self.ctrl = controller or ChatController()
+        self.prefs = Prefs()
         self.ctrl.on_update = self.on_update
         self.manage_dialog = None
         self.find_dialog = None
+        self.password_dialog = None
+        self.verify_dialog = None
+        self.sound_var = tk.BooleanVar(value=True)
         self.login = None
         self.main = None
+        self._icon_image = None
+        self.calls = CallManager(self)
+        self._set_icon()
         self.show_login()
         self.protocol("WM_DELETE_WINDOW", self.close)
+        self.bind("<FocusIn>", self._on_focus_in)
         self.after(100, self._poll)
+
+    def _set_icon(self):
+        """Window / taskbar icon (works from source and from the packaged .exe)."""
+        try:
+            self._icon_image = tk.PhotoImage(file=resource_path("assets", "icon.png"))
+            self.iconphoto(True, self._icon_image)
+        except tk.TclError:
+            pass
+        if notify.IS_WINDOWS:
+            try:
+                self.iconbitmap(resource_path("assets", "icon.ico"))
+            except tk.TclError:
+                pass
+
+    def _on_focus_in(self, _event=None):
+        notify.stop_flashing(self)
+        self._update_title()
+
+    def _update_title(self):
+        total = self.main.total_unread() if self.main else 0
+        self.title(f"({total}) {APP_TITLE}" if total else APP_TITLE)
+
+    def show_about(self):
+        AboutDialog(self)
+
+    def show_change_password(self):
+        if self.main is None:
+            return
+        self.password_dialog = ChangePasswordDialog(self.main, self.ctrl)
+
+    def _alert_for(self, info):
+        """A message from someone else arrived: sound + taskbar flash when the window is in the background."""
+        try:
+            if notify.window_in_background(self):
+                notify.alert(self, sound=self.sound_var.get())
+            elif info["key"] != self.ctrl.current and not info.get("queued") and self.sound_var.get():
+                notify.beep(self)                      # another chat got a message while you look at this one
+        except tk.TclError:
+            pass
 
     def _setup_theme(self):
         style = ttk.Style(self)
@@ -957,7 +1260,8 @@ class App(tk.Tk):
         try:
             self.ctrl.poll()
         finally:
-            self.after(100, self._poll)
+            # during a call, audio must be handed to the speaker promptly: poll every 20 ms instead of 100 ms
+            self.after(20 if self.calls.engine is not None else 100, self._poll)
 
     def _clear(self):
         for f in (self.login, self.main):
@@ -968,6 +1272,7 @@ class App(tk.Tk):
 
     def show_login(self, message=None, ok=False):
         self._clear()
+        self.title(APP_TITLE)
         self.login = LoginFrame(self)
         self.login.pack(fill="both", expand=True)
         if message:
@@ -981,9 +1286,11 @@ class App(tk.Tk):
             self.main.toast("Tip: add a profile photo in Settings.")
 
     def logout(self):
+        self.calls.shutdown()
         self.ctrl.logout()
 
     def close(self):
+        self.calls.shutdown()                    # hang up properly and free the microphone / camera first
         self.ctrl.shutdown()
         self.destroy()
 
@@ -1017,8 +1324,10 @@ class App(tk.Tk):
             if login:
                 self.show_main()
         elif topic == "logged_out":
+            self.calls.shutdown(hang_up=False)
             self.show_login()
         elif topic == "kicked":
+            self.calls.shutdown(hang_up=False)
             self.show_login(payload)
         elif main is None:
             return
@@ -1032,6 +1341,29 @@ class App(tk.Tk):
             main.info.draw()
         elif topic == "unread":
             main.refresh_unread()
+            self._update_title()
+        elif topic == "incoming":
+            self._alert_for(payload)
+        elif topic == "call_incoming":
+            self.calls.on_incoming(payload or {})
+        elif topic == "call_status":
+            self.calls.on_status(payload or {})
+        elif topic == "call_media":
+            self.calls.on_media(payload or {})
+        elif topic == "call_history":
+            main.sidebar.refresh()
+        elif topic == "typing":
+            if payload == self.ctrl.current:
+                main.chat.draw_header()
+        elif topic == "verification":
+            main.chat.draw_header()
+            main.info.draw()
+            if self.verify_dialog is not None and self.verify_dialog.winfo_exists():
+                self.verify_dialog.refresh()
+        elif topic == "password_changed":
+            dlg = self.password_dialog
+            if dlg is not None and dlg.winfo_exists():
+                dlg.result(payload)
         elif topic == "conversation":
             main.on_conversation(payload)
         elif topic == "profile_result":

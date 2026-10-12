@@ -13,12 +13,13 @@ Client -> server types
     friend_request, friend_respond, friend_remove, user_search,
     send_dm, send_group, history,
     group_create, group_add, group_remove, group_leave,
+    group_rename, group_transfer, change_password, typing,
     profile_update, avatar_set, avatar_get, password_change
 
 Server -> client types
-    register_result, login_result, pong, state, presence,
+    register_result, login_result, password_changed, pong, state, presence,
     friend_request_in, request_sent, request_cleared, friend_added, friend_removed,
-    message, group_message, history, user_list,
+    message, group_message, delivered, typing, history, user_list,
     group_update, group_removed,
     last_message (newest message of a conversation, sent after login for the chat list),
     profile_result, profile (someone changed their profile), avatar, password_result,
@@ -230,6 +231,17 @@ def normalize_username(value) -> str:
     return value.strip().lower() if isinstance(value, str) else ""
 
 
+def validate_password(password, confirm):
+    """Return an error string, or None if the password (and its confirmation) are acceptable."""
+    if not isinstance(password, str) or len(password) < MIN_PASSWORD:
+        return f"Password must be at least {MIN_PASSWORD} characters."
+    if len(password) > MAX_PASSWORD or len(password.encode("utf-8")) > MAX_PASSWORD_BYTES:
+        return f"Password must be at most {MAX_PASSWORD} characters."
+    if password != confirm:
+        return MSG_PASSWORD_MISMATCH
+    return None
+
+
 def validate_registration(username, password, confirm, fullname):
     """Return an error string, or None if the registration data is valid."""
     if not isinstance(fullname, str) or not fullname.strip():
@@ -238,13 +250,7 @@ def validate_registration(username, password, confirm, fullname):
         return f"Full name must be at most {MAX_FULLNAME} characters."
     if not USERNAME_RE.match(username or ""):
         return "Username must be 3-20 characters: letters, numbers or underscore."
-    if not isinstance(password, str) or len(password) < MIN_PASSWORD:
-        return f"Password must be at least {MIN_PASSWORD} characters."
-    if len(password) > MAX_PASSWORD or len(password.encode("utf-8")) > MAX_PASSWORD_BYTES:
-        return f"Password must be at most {MAX_PASSWORD} characters."
-    if password != confirm:
-        return MSG_PASSWORD_MISMATCH
-    return None
+    return validate_password(password, confirm)
 
 
 def validate_profile(fullname, bio):
@@ -284,13 +290,8 @@ def validate_avatar(value):
 
 def validate_new_password(password, confirm):
     """Same password rules as registration. Returns an error string or None."""
-    if not isinstance(password, str) or len(password) < MIN_PASSWORD:
-        return f"Password must be at least {MIN_PASSWORD} characters."
-    if len(password) > MAX_PASSWORD or len(password.encode("utf-8")) > MAX_PASSWORD_BYTES:
-        return f"Password must be at most {MAX_PASSWORD} characters."
-    if password != confirm:
-        return MSG_PASSWORD_MISMATCH
-    return None
+    return validate_password(password, confirm)
+
 
 
 def validate_public_key(value):

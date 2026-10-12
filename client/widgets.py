@@ -110,6 +110,8 @@ _BUTTON_STYLES = {
     "primary": {"fill": ("#1a74ff", "#0a55e0"), "hover": ("#3a8aff", "#1768f0"), "text": "#ffffff", "outline": None},
     "secondary": {"fill": (T.FIELD, T.FIELD), "hover": ("#102446", "#102446"), "text": T.TEXT, "outline": T.FIELD_LINE},
     "danger": {"fill": (T.BG, T.BG), "hover": ("#2a0f1d", "#2a0f1d"), "text": T.RED, "outline": "#5a1c2c"},
+    "success": {"fill": ("#2bd16a", "#16a34a"), "hover": ("#3ee07c", "#22c55e"), "text": "#ffffff", "outline": None},
+    "end": {"fill": ("#f05252", "#cf2b3d"), "hover": ("#ff6a6a", "#e0364a"), "text": "#ffffff", "outline": None},
     "disabled": {"fill": ("#0d1830", "#0d1830"), "hover": ("#0d1830", "#0d1830"), "text": T.DIM, "outline": None},
 }
 
@@ -532,8 +534,10 @@ class MessageView(tk.Canvas):
         sy = y + bh - 12 - small.metrics("linespace")
         if mine:
             self.create_text(x + bw - 20 - 22, sy, text=stamp, anchor="ne", fill="#cfe0ff", font=small, tags=tag)
+            delivered = it.get("delivered")             # two ticks once the other person has received it
             self.create_image(x + bw - 20, sy + small.metrics("linespace") // 2, anchor="e", tags=tag,
-                              image=T.icon("check2", 17, "#9fd0ff", 2.2))
+                              image=T.icon("check2" if delivered else "check", 17,
+                                           "#67e8f9" if delivered else "#9fd0ff", 2.2))
         else:
             self.create_text(x + bw - 20, sy, text=stamp, anchor="ne", fill=T.MUTED, font=small, tags=tag)
         for seq in ("<Button-3>", "<Button-2>"):

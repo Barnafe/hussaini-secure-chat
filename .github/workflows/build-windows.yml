@@ -26,7 +26,7 @@ jobs:
       - name: Install packages
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt -r requirements-build.txt
+          pip install -r requirements-dev.txt -r requirements-build.txt -r requirements-media.txt
 
       # The tests never block the build (they were developed on Linux); a warning here means
       # "look at the log". The two smoke tests further down DO block, because they prove the
@@ -58,22 +58,72 @@ jobs:
           }
           Write-Host "HussainiChat.exe opened and closed correctly."
 
+      - name: Smoke test - voice/video packages are inside the .exe
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist/HussainiChat.exe" -ArgumentList "--selftest-calls" -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            if (Test-Path "dist/hussaini_error.log") { Get-Content "dist/hussaini_error.log" }
+            throw "HussainiChat.exe is missing the calling packages (exit code $($p.ExitCode))"
+          }
+          Write-Host "Calling packages are bundled."
+
       - name: Assemble the release folder
         run: python packaging/assemble.py --dist dist --out release
 
-      - name: Upload HussainiChat-Windows
+      - name: Upload HussainiChat-Windows (the zip contents)
         uses: actions/upload-artifact@v7
         with:
           name: HussainiChat-Windows
           path: release/HussainiChat-Windows/
           if-no-files-found: error
 
+      # ---- optional: the proper installer (Setup.exe with desktop shortcut). Never blocks the build. ----
+      - name: Install Inno Setup
+        continue-on-error: true
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Build the installer (HussainiChat-Setup.exe)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { $iscc = Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe" }
+          $ver = python -c "from shared.version import VERSION; print(VERSION)"
+          & $iscc "/DAppVersion=$ver" "/DSourceDir=$PWD\release\HussainiChat-Windows" packaging\windows\installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+
+      - name: Test the installer (silent install, run a server command, uninstall)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $dir = Join-Path $PWD "installtest"
+          Start-Process -FilePath "release\HussainiChat-Setup.exe" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/DIR=$dir" -Wait
+          foreach ($f in "HussainiChat.exe","HussainiServer.exe","settings.txt","start-demo.bat") {
+            if (-not (Test-Path (Join-Path $dir $f))) { throw "installer did not install $f" }
+          }
+          & (Join-Path $dir "HussainiServer.exe") --list-users
+          if ($LASTEXITCODE -ne 0) { throw "installed server failed" }
+          Start-Process -FilePath (Join-Path $dir "unins000.exe") -ArgumentList "/VERYSILENT" -Wait
+          Write-Host "Installer works: files installed, server runs, uninstall ok."
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: HussainiChat-Installer
+          path: release/HussainiChat-Setup.exe
+          if-no-files-found: ignore
+
       - name: Create a GitHub Release (only when you pushed a tag like v1.0)
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" release/HussainiChat-Windows.zip --title "Hussaini Secure Chat ${{ github.ref_name }}" --generate-notes
+        run: |
+          $files = @("release/HussainiChat-Windows.zip")
+          if (Test-Path "release/HussainiChat-Setup.exe") { $files += "release/HussainiChat-Setup.exe" }
+          gh release create "${{ github.ref_name }}" @files --title "Hussaini Secure Chat ${{ github.ref_name }}" --generate-notes
 
       - name: Upload build logs if something failed
         if: failure()

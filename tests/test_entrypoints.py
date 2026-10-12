@@ -152,7 +152,7 @@ def test_assemble_script_builds_the_release_folder(tmp_path):
                     "--dist", str(dist), "--out", str(out)], check=True, cwd=ROOT)
     folder = out / "HussainiChat-Windows"
     for name in ("HussainiServer.exe", "HussainiChat.exe", "start-demo.bat", "show-database.bat",
-                 "settings.txt", "README.txt", "PRESENTATION_GUIDE.txt"):
+                 "server-tools.bat", "settings.txt", "README.txt", "PRESENTATION_GUIDE.txt"):
         assert (folder / name).is_file(), name
     assert (folder / "data").is_dir()
     assert (folder / "start-demo.bat").read_bytes().count(b"\r\n") > 5      # Windows line endings

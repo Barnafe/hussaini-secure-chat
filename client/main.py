@@ -30,9 +30,20 @@ def selftest():
     return 0
 
 
+def selftest_calls():
+    """Build pipeline check: the calling packages must be inside the program (opens no device)."""
+    from client.media_engine import calling_support
+    ok, missing = calling_support()
+    if not ok:
+        _log_crash("Calling packages missing from this build: " + ", ".join(missing))
+    return 0 if ok else 2
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     try:
+        if "--selftest-calls" in argv:
+            return selftest_calls()
         if "--selftest" in argv:
             return selftest()
         from client.gui import App

@@ -22,3 +22,9 @@ def db(tmp_path):
 def _private_client_prefs(tmp_path, monkeypatch):
     """Never let a test write client_prefs.json into the project folder."""
     monkeypatch.setenv("HUSSAINI_PREFS_FILE", str(tmp_path / "client_prefs.json"))
+
+
+@pytest.fixture(autouse=True)
+def _private_trust_file(tmp_path, monkeypatch):
+    """Tests must never touch the real ~/.hussaini_trust.json of the person running them."""
+    monkeypatch.setenv("HUSSAINI_TRUST_FILE", str(tmp_path / "trust.json"))

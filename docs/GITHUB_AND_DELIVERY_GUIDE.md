@@ -31,7 +31,11 @@ git push -u origin main
 2. The run **Build Windows package** starts automatically after your push (about 5-10 minutes).
    You can also start it manually: *Build Windows package → Run workflow → Run workflow*.
 3. Wait for the green tick. A **yellow warning** on "Run the tests" is not fatal (see Troubleshooting).
-4. Click the finished run, scroll to **Artifacts** at the bottom, click **HussainiChat-Windows**. A zip downloads.
+4. Click the finished run, scroll to **Artifacts** at the bottom. You get up to two downloads:
+   * **HussainiChat-Windows** - a zip with both programs, `start-demo.bat`, the guides... (extract it into a folder).
+   * **HussainiChat-Installer** - `HussainiChat-Setup.exe`, a normal Windows installer (Start-menu entries and a
+     **desktop shortcut**, no administrator rights needed). If this one is missing, the zip above is all you need -
+     the installer step is optional and never stops the build.
 
 ## D. Test it on a Windows laptop (do this before giving it to your friend)
 1. Create a folder (for example `Desktop\HussainiChat`) and **extract the downloaded zip into it**.

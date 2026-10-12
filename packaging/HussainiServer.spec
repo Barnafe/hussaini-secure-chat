@@ -30,4 +30,5 @@ exe = EXE(
     upx=False,
     runtime_tmpdir=None,
     console=True,
+    icon=os.path.join(ROOT, 'client', 'assets', 'icon.ico'),
 )

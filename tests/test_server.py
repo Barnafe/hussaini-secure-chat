@@ -533,3 +533,48 @@ def test_user_search_is_injection_safe_and_ignores_bad_input(srv):
     alice.send(type="user_search", query="'; DROP TABLE users;--")
     assert alice.expect("user_list")["users"] == []
     assert srv.db.get_user("bob") is not None                    # the table is intact
+
+
+def test_live_group_message_never_skips_older_undelivered_ones(tmp_path):
+    """A live message must not move the delivered marker past older messages still queued for that member."""
+    from server.database import Database
+    db = Database(sqlite_path=str(tmp_path / "cursor.db"))
+    for name in ("alice", "bob", "carol"):
+        db.create_user(name, "x", name.title(), "k" + name)
+    gid = db.create_group("G", "alice", ["bob", "carol"])
+    m1, _ = db.save_group_message(gid, "alice", "one")
+    m2, _ = db.save_group_message(gid, "alice", "two")
+    m3, _ = db.save_group_message(gid, "alice", "three")
+    # carol has been offline for all three; a live copy of #3 reaches her while she is logging in
+    db.set_group_cursor_if_caught_up(gid, "carol", m3)
+    assert [r["message_id"] for r in db.group_backlog(gid, "carol")] == [m1, m2, m3], "older messages must survive"
+    # a member who is up to date moves forward normally
+    db.set_group_cursor(gid, "bob", m2)
+    db.set_group_cursor_if_caught_up(gid, "bob", m3)
+    assert db.group_backlog(gid, "bob") == []
+    db.close()
+
+
+def test_login_backlog_arrives_once_in_order_even_when_a_message_races_the_login(srv):
+    """The race that used to lose or duplicate group messages: someone sends right as a member logs back in."""
+    alice, bob, carol = three_friends(srv)
+    alice.send(type="group_create", name="G", members=["bob", "carol"])
+    gid = alice.expect("group_update")["group"]["group_id"]
+    carol.send(type="logout")
+    carol.expect("logged_out")
+    for round_no in range(12):
+        payloads = [enc_group("alice", gid, f"round {round_no} message {i}", ["alice", "bob", "carol"]) for i in range(2)]
+        for p in payloads:
+            alice.send(type="send_group", group_id=gid, payload=p)
+            alice.expect("group_message")          # (the server may still be handing it to the other members)
+        again = TClient(srv.url)                   # carol comes back at the worst possible moment
+        again.send(type="login", username="carol", password=PASSWORD, public_key=IDENTITIES["carol"].public_key_b64)
+        msgs = again.drain(0.4)
+        kinds = [m["type"] for m in msgs]
+        ids = [m["id"] for m in msgs if m["type"] == "group_message"]
+        assert kinds[0] == "login_result", f"round {round_no}: something arrived before the login reply: {kinds}"
+        assert len(ids) == 2 and ids == sorted(ids) and len(set(ids)) == 2, \
+            f"round {round_no}: carol must get exactly her 2 queued messages, in order; got {ids}"
+        assert all(m["queued"] for m in msgs if m["type"] == "group_message")
+        again.send(type="logout")
+        again.expect("logged_out")

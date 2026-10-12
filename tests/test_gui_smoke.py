@@ -211,7 +211,7 @@ def test_full_gui_flow(env, tmp_path):
     page.new_var.set("BrandNew123")
     page.conf_var.set("BrandNew123")
     page.change_password()
-    pump(app, lambda: "Password changed." in page.pw_msg.cget("text"), what="password changed")
+    pump(app, lambda: "Password changed" in page.pw_msg.cget("text"), what="password changed")
 
     # ---- logout returns to the login window ----------------------------------------------
     app.logout()
@@ -223,3 +223,206 @@ def test_selftest_entry_point_opens_and_closes_the_window(env):
     env.app = types.SimpleNamespace(close=lambda: None)         # already closed; keep the fixture teardown quiet
     from client.main import main
     assert main(["--selftest"]) == 0
+
+
+def gui_login(app, srv, username, fullname):
+    """Register and sign in through the real forms; returns the passphrase."""
+    login = app.login
+    login.server.set(srv.address)
+    login.r_name.set(fullname)
+    login.r_user.set(username)
+    login.r_pass.set(PW)
+    login.r_conf.set(PW)
+    login.do_register()
+    pump(app, lambda: login.passphrase_dialog is not None, what="passphrase dialog")
+    dlg = login.passphrase_dialog
+    dlg.saved.set(True)
+    dlg._toggle()
+    dlg.destroy()
+    login.l_pass.set(PW)
+    login.do_login()
+    pump(app, lambda: app.main is not None, what="main window")
+
+
+def test_add_friend_dialog_lists_everyone_and_has_a_search_bar(env):
+    from client.gui import AddFriendDialog
+    app, srv = env.app, env.srv
+    others = []
+    for name, full in (("bob", "Bob Bello"), ("carol", "Carol Musa"), ("dave", "Dave Danjuma")):
+        p = Peer(srv)
+        assert p.register(name, full)["ok"]
+        others.append(p)
+    others[0].login("bob")                                    # bob online, carol and dave offline
+    gui_login(app, srv, "alice", "Alice Adamu")
+    main = app.main
+    main.add_friend()                                         # the "Add friend..." button
+    dlg = app.find_dialog
+    # everybody is listed straight away - no searching needed
+    pump(app, lambda: dlg.lb.size() == 3, what="all users listed")
+    rows = [dlg.lb.get(i) for i in range(3)]
+    assert "Bob Bello" in rows[0] and "Carol Musa" in rows[1] and "Dave Danjuma" in rows[2]
+    assert rows[0].lstrip().startswith("\u25cf") and rows[1].lstrip().startswith("\u25cb")   # online / offline
+    assert "3 people" in dlg.count.cget("text")
+    assert str(dlg.btn.cget("state")) == "disabled"            # nothing selected yet
+    # the search bar narrows the list
+    dlg.query.set("mus")
+    dlg._search()
+    pump(app, lambda: dlg.lb.size() == 1, what="filtered list")
+    assert "Carol Musa" in dlg.lb.get(0) and 'matching "mus"' in dlg.count.cget("text")
+    dlg.query.set("zzz")
+    dlg._search()
+    pump(app, lambda: dlg.lb.size() == 0, what="no match")
+    assert "No one matches" in dlg.count.cget("text")
+    dlg.query.set("")
+    dlg._search()
+    pump(app, lambda: dlg.lb.size() == 3, what="full list again")
+    # pick Bob and send the request from the list
+    dlg.lb.selection_set(0)
+    dlg._update_button()
+    assert str(dlg.btn.cget("state")) == "normal"
+    dlg.send()
+    others[0].wait(lambda: others[0].ctrl.requests_in, what="bob receives the request")
+    pump(app, lambda: "Request sent" in dlg.lb.get(0), what="row shows Request sent")
+    assert str(dlg.btn.cget("state")) == "disabled"            # cannot send twice
+    others[0].ctrl.respond_request("alice", True)
+    pump(app, lambda: "Friends" in dlg.lb.get(0), what="row shows Friends")
+    dlg.destroy()
+
+
+def widget_all_text(widget):
+    """Every label text inside a window (used to check the About box)."""
+    out = []
+    for child in widget.winfo_children():
+        try:
+            out.append(str(child.cget("text")))
+        except tk.TclError:
+            pass
+        out.extend(widget_all_text(child))
+    return out
+
+
+def test_version_1_1_features_in_the_window(env, monkeypatch):
+    from client import gui, notify
+    from shared import version
+    app, srv = env.app, env.srv
+    bob, carol = Peer(srv), Peer(srv)
+    assert bob.register("bob", "Bob Bello")["ok"] and carol.register("carol", "Carol Musa")["ok"]
+    bob.login("bob")
+    carol.login("carol")
+    gui_login(app, srv, "alice", "Alice Adamu")
+    main = app.main
+
+    def pump_all(cond, what="condition", timeout=8.0):
+        """Run the window AND the other users' controllers (they only process messages when polled)."""
+        end = time.time() + timeout
+        while time.time() < end:
+            for peer in (bob, carol):
+                peer.ctrl.poll()
+            app.update()
+            if cond():
+                return
+            time.sleep(0.02)
+        raise AssertionError(f"timed out waiting for {what}")
+
+    def msgs():
+        return [it for it in main.chat.view.items if it["type"] == "msg"]
+
+    def chats():
+        return [r for r in main.sidebar.list.rows if r["kind"] == "chat"]
+
+    assert str(app.title()) == version.APP_NAME
+    for peer, name in ((bob, "bob"), (carol, "carol")):          # make both friends of alice
+        app.ctrl.send_friend_request(name)
+        peer.wait(lambda p=peer: p.ctrl.requests_in, what="request")
+        peer.ctrl.respond_request("alice", True)
+    pump_all(lambda: len(app.ctrl.friends) == 2, what="two friends")
+
+    # --- About box (from the app menu / settings) -----------------------------------------
+    app.show_about()
+    about = [w for w in app.winfo_children() if isinstance(w, gui.AboutDialog)][0]
+    texts = " ".join(widget_all_text(about))
+    assert version.VERSION in texts and version.AUTHOR in texts
+    about.destroy()
+
+    # --- date divider and two ticks (bob is online) ------------------------------------------
+    main.open_conversation(dm_key("bob"))
+    bob.ctrl.open_conversation(dm_key("alice"))
+    main.chat.entry.insert(0, "Ticks please")
+    main.chat.send()
+    pump_all(lambda: any(m["text"] == "Ticks please" for m in msgs()), what="own message")
+    items = main.chat.view.items
+    assert any(it["type"] == "day" and it["text"].startswith("Today") for it in items)      # date divider
+    pump_all(lambda: msgs()[-1].get("delivered") is True, what="second tick (recipient online)")
+
+    # --- typing indicator ---------------------------------------------------------------------
+    bob.ctrl.notify_typing()
+    pump_all(lambda: "is typing" in main.chat.status_text, what="typing line")
+    bob.ctrl.send_text("Reply with a long enough text to need a preview cut somewhere here")
+    pump_all(lambda: "is typing" not in main.chat.status_text, what="typing cleared by the message")
+
+    # --- chat-list previews and sorting --------------------------------------------------------
+    main.close_conversation()
+    main.set_view("chats")
+    pump_all(lambda: chats() and chats()[0]["name"] == "Bob Bello", what="bob's chat on top")
+    assert chats()[0]["last"]["text"].startswith("Reply with a long")
+    carol.ctrl.open_conversation(dm_key("alice"))
+    carol.ctrl.send_text("Newest message")
+    pump_all(lambda: chats()[0]["name"] == "Carol Musa", what="newest chat moves to the top")
+    assert chats()[0]["last"]["text"] == "Newest message"
+    assert app.ctrl.preview(dm_key("carol")) == "Newest message"
+
+    # --- new-message alert (sound + flash) ---------------------------------------------------------
+    calls = []
+    monkeypatch.setattr(notify, "window_in_background", lambda root: True)
+    monkeypatch.setattr(notify, "alert", lambda root, sound=True: calls.append(sound))
+    bob.ctrl.send_text("Are you there?")
+    pump_all(lambda: calls, what="alert when the window is in the background")
+    assert calls == [True]
+    pump_all(lambda: str(app.title()).startswith("("), what="unread count in the title")   # "(2) Hussaini Secure Chat"
+    app.sound_var.set(False)
+    bob.ctrl.send_text("Still there?")
+    pump_all(lambda: len(calls) == 2, what="second alert")
+    assert calls == [True, False]                                 # sound switch respected, still flashes
+
+    # --- verify (safety number) -----------------------------------------------------------------
+    main.open_conversation(dm_key("bob"))
+    main.open_verify()
+    dlg = app.verify_dialog
+    assert app.ctrl.safety_number_for("bob").split()[0] in " ".join(widget_all_text(dlg)).replace("\n", " ")
+    assert "Not verified" in dlg.state.cget("text")
+    dlg.mark()
+    pump_all(lambda: "Verified" in main.chat.status_text, what="verified badge in the header")
+    assert "Verified" in dlg.state.cget("text")
+    dlg.destroy()
+
+    # --- change password (window) ------------------------------------------------------------------
+    app.show_change_password()
+    pw = app.password_dialog
+    pw.vars["current"].set(PW)
+    pw.vars["new"].set("BrandNew123")
+    pw.vars["confirm"].set("BrandNew123")
+    pw.submit()
+    pump_all(lambda: "Password changed successfully." in pw.msg.cget("text"), what="password changed")
+    assert pw.btn.cget("text") == "Close"
+    pw.destroy()
+
+    # --- group: sender colours, rename, hand over admin -----------------------------------------------
+    app.ctrl.create_group("Study Circle", ["bob", "carol"])
+    pump_all(lambda: app.ctrl.groups, what="group created")
+    gid = next(iter(app.ctrl.groups))
+    bob.wait(lambda: gid in bob.ctrl.groups, what="bob in group")
+    bob.ctrl.open_conversation(group_key(gid))
+    bob.ctrl.send_text("Hello team")
+    main.open_conversation(group_key(gid))
+    pump_all(lambda: any(m["text"] == "Hello team" for m in msgs()), what="group message")
+    hello = next(m for m in msgs() if m["text"] == "Hello team")
+    assert hello["sender"] == "Bob Bello" and hello["name_color"]            # sender name carries a colour
+    manage = gui.ManageGroupDialog(main, app.ctrl, gid)
+    manage.rename_var.set("Final Year Project")
+    manage.rename()
+    pump_all(lambda: app.ctrl.groups[gid]["name"] == "Final Year Project", what="renamed")
+    monkeypatch.setattr(gui.messagebox, "askyesno", lambda *a, **k: True)
+    manage.lb.selection_set(manage.members.index("bob"))
+    manage.make_admin()
+    pump_all(lambda: app.ctrl.groups[gid]["admin"] == "bob", what="admin handed over")
+    manage.destroy()
